@@ -80,7 +80,7 @@ export default function MediaNarrativeGame(){
 
   // Operating cost (bankruptcy rule)
   const [belowMustStreak, setBelowMustStreak] = useState(0);
-  function mustNeed(){ return 20 + (day-1)*5; } // increases each day by $5
+  function mustNeed(){ return 50 + (day-1)*10; } // increases each day by $10
 
   // Deltas snapshot
   const [last, setLast] = useState({ opinion:50, pol:30, trust:65, reach:0, money:0, pressure:null, license:null });
