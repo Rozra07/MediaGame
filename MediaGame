@@ -1,653 +1,901 @@
 "use client";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { motion, AnimatePresence, useMotionValue, useTransform, animate } from "framer-motion";
-import { Megaphone, ThumbsUp, AlertTriangle, Gauge, Target, RefreshCcw, X, DollarSign, Landmark } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import { Megaphone, RefreshCcw, Info, DollarSign, Gauge as GaugeIcon, Newspaper, X } from "lucide-react";
 
-/* ==========================
-   Helpers
-   ========================== */
+/* --------------------------- THEME --------------------------- */
+const FunStyles = () => (
+  <style>{`
+  @keyframes floaty { 0%{transform:translateY(0)} 50%{transform:translateY(-6px)} 100%{transform:translateY(0)} }
+  @keyframes shake { 10%, 90% { transform: translateX(-1px); } 20%, 80% { transform: translateX(2px); }
+                     30%, 50%, 70% { transform: translateX(-3px); } 40%, 60% { transform: translateX(3px); } }
+  @keyframes dangerPulse { 0%{ box-shadow:0 0 0 0 rgba(239,68,68,.45) } 70%{ box-shadow:0 0 18px 10px rgba(239,68,68,.20) } 100%{ box-shadow:0 0 0 0 rgba(239,68,68,0) } }
+  .danger-glow { animation: dangerPulse 1.1s ease-in-out infinite; }
+  .fun-card { background: radial-gradient(1200px 300px at -10% -40%, #e9d5ff 0%, transparent 35%), radial-gradient(1000px 250px at 120% -30%, #bfdbfe 0%, transparent 40%), radial-gradient(1200px 260px at 0% 130%, #bbf7d0 0%, transparent 45%); }
+  .option-card { background-image: linear-gradient(135deg, rgba(255,255,255,.85), rgba(255,255,255,.6)), radial-gradient(1000px 400px at -10% -30%, #fecdd3 0%, transparent 40%), radial-gradient(1000px 400px at 110% -20%, #fde68a 0%, transparent 40%); }
+  .option-card:hover { transform: translateY(-2px); box-shadow: 0 18px 30px -12px rgba(0,0,0,.25); }
+  .shake { animation: shake .45s linear both; }
+  .gaugeText { font-variant-numeric: tabular-nums; }
+  .badge { box-shadow: 0 8px 16px -8px rgba(0,0,0,.25); }
+  .comic { background: conic-gradient(from 210deg at 10% 10%, #fff 0deg, #fff 200deg, #eef2ff 200deg, #eef2ff 360deg); border: 2px solid #111827; }
+  .comic h3 { text-shadow: 1px 1px 0 #111827; }
+  `}</style>
+);
+
+/* --------------------------- UTILS --------------------------- */
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 const clamp100 = (v) => Math.max(0, Math.min(100, v));
-const sign = (n)=> n>0?'+':n<0?'-':'';
-const cls = (n)=> (n??0)>=0? 'text-emerald-700' : 'text-rose-700';
+const rint = (a,b)=> Math.round(a + Math.random()*(b-a));
 const rnd = (a,b)=> a + Math.random()*(b-a);
-const rint = (a,b)=> Math.round(rnd(a,b));
+const sign = (n)=> n>0?'+':n<0?'-':'';
 const switchParty = (p)=> (p==='Party A'?'Party B':'Party A');
 
-/* ==========================
-   Global knobs
-   ========================== */
 const MAX_DAY = 20;
 const AD_SUPPORT = { A: 0.40, B: 0.35, AGN: 0.25 };
-const PULL_OUT_THRESHOLD = -40; // goodwill below this pauses payouts
+const FORCED_DAYS = [6, 11, 14];
 
-/* ==========================
-   Costs (plateau after Day 10)
-   ========================== */
+/* ---------- deterministic RNG for SSR/CSR parity ---------- */
+function xmur3(str){ let h=1779033703^str.length; for(let i=0;i<str.length;i++){h=Math.imul(h^str.charCodeAt(i),3432918353); h=(h<<13)|(h>>>19);} return function(){h=Math.imul(h^(h>>>16),2246822507); h=Math.imul(h^(h>>>13),3266489909); return (h^=h>>>16)>>>0;}; }
+function sfc32(a,b,c,d){ return function(){a|=0;b|=0;c|=0;d|=0;let t=(a+b|0)+d|0;d=d+1|0;a=b^b>>>9;b=c+(c<<3)|0;c=(c<<21|c>>>11);c=c+t|0;return (t>>>0)/4294967296;}; }
+function makeRng(seedStr){ const s=xmur3(seedStr); return sfc32(s(),s(),s(),s()); }
+const srnd = (rng,a,b)=> a + (b-a)*rng();
+
+/* --------------------------- SOUND --------------------------- */
+function useSfx(){
+  const ctxRef = useRef(null);
+  const ensure = () => {
+    if (!ctxRef.current) {
+      const AC = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
+      if (AC) ctxRef.current = new AC();
+    }
+    return ctxRef.current;
+  };
+  const tone = (freq, dur=0.12, type='sine', vol=0.02) => {
+    const ctx = ensure(); if (!ctx) return;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type; o.frequency.value = freq;
+    o.connect(g); g.connect(ctx.destination);
+    const now = ctx.currentTime;
+    g.gain.setValueAtTime(vol, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now+dur);
+    o.start(now); o.stop(now+dur);
+  };
+  return {
+    click: ()=> tone(600, 0.05, 'sine', 0.03),
+    success: ()=> { tone(880, 0.07, 'triangle', 0.035); setTimeout(()=> tone(1020, 0.07, 'triangle', 0.03), 90); },
+    fail: ()=> { tone(220, 0.14, 'sawtooth', 0.03); setTimeout(()=> tone(180, 0.12, 'sawtooth', 0.02), 70); },
+    whoosh: ()=> { tone(500, 0.05, 'sine', 0.02); setTimeout(()=> tone(400, 0.05, 'sine', 0.015), 50); },
+    alert: ()=> { tone(480, 0.09, 'square', 0.035); setTimeout(()=> tone(520, 0.09, 'square', 0.03), 100); },
+  };
+}
+
+/* --------------------------- ECON / COST --------------------------- */
+function nextInflation(curr, day){
+  const targetMax = day <= 10 ? 6.0 : 9.0;
+  const targetMin = day <= 10 ? 3.5 : 4.0;
+  const step = rnd(-0.4, 0.6);
+  return Math.round(Math.max(targetMin, Math.min(targetMax, curr + step))*10)/10;
+}
+function dayGrowthRate(day){ return day <= 10 ? rnd(0.03, 0.05) : rnd(0.05, 0.08); }
 function opCost(day, reach){
-  // Base plateaus after day 10; scale softens after day 10 as well
   const d = Math.min(day, 10);
-  const base = 45 + (d-1)*8; // plateau base
+  const base = 45 + (d-1)*8;
   const a = day <= 10 ? 0.05 : 0.03;
   const b = day <= 10 ? 0.0008 : 0.0004;
   const scale = Math.round(a*reach + b*reach*reach);
-  return base + scale;
+  const total = base + scale;
+  return day===13 ? Math.round(total*1.2) : total;
 }
 
-/* ==========================
-   Scenarios with ground truth side
-   ========================== */
+/* --------------------------- SCENES --------------------------- */
 const SCENES = [
-  { title: "Fuel Prices Spike Unexpectedly", truth: 'opposition', kind: 'economy' },
-  { title: "Policy X Passed in Parliament", truth: 'ruling', kind: 'policy' },
-  { title: "New Climate Risk Paper Released", truth: 'neutral', kind: 'science' },
-  { title: "Celebrity Scandal Rocks Industry", truth: 'neutral', kind: 'culture' },
-  { title: "Election Rally Draws Massive Crowds", truth: 'ruling', kind: 'politics' },
-  { title: "Corporate Corruption Exposé Emerges", truth: 'opposition', kind: 'business' },
-  { title: "City Faces Crime Wave Rumors", truth: 'neutral', kind: 'crime' },
-  { title: "Tech Platform Alters News Ranking", truth: 'neutral', kind: 'tech' },
+  { title: "Fuel Prices Spike Unexpectedly", truth: 'opposition', kind: 'economy', badge: "Economy", art:'💹' },
+  { title: "Policy X Passed in Parliament",    truth: 'ruling',     kind: 'policy',  badge: "Policy", art:'🏛️' },
+  { title: "New Climate Risk Paper Released",  truth: 'neutral',    kind: 'science', badge: "Science", art:'🌍' },
+  { title: "Celebrity Scandal Rocks Industry", truth: 'neutral',    kind: 'culture', badge: "Scandal", art:'🎭' },
+  { title: "Election Rally Draws Massive Crowds", truth:'ruling',   kind: 'politics',badge: "Politics", art:'🗳️' },
+  { title: "Corporate Corruption Exposé Emerges", truth:'opposition',kind:'business',badge:"Business", art:'💼' },
+  { title: "City Faces Crime Wave Rumors",     truth: 'neutral',    kind: 'crime',   badge: "Crime", art:'🚔' },
+  { title: "Tech Platform Alters News Ranking",truth: 'neutral',    kind: 'tech',    badge: "Tech", art:'📱' },
 ];
 
-/* ==========================
-   Options
-   ========================== */
-function buildOptions(scene, ruling){
-  // Accuracy baselines now depend on the day's ground truth
-  const accInvestigate = clamp01(rnd(0.9, 1));
+/* ---------- Options (no funded report) ---------- */
+function buildOptions(scene, ruling, rng){
+  const accInvestigate = clamp01(srnd(rng, 0.9, 1));
   let accGov, accOpp;
-  if (scene.truth === 'ruling') { accGov = clamp01(rnd(0.9, 1)); accOpp = clamp01(rnd(0.2, 0.5)); }
-  else if (scene.truth === 'opposition') { accGov = clamp01(rnd(0.4, 0.7)); accOpp = clamp01(rnd(0.9, 1)); }
-  else { accGov = clamp01(rnd(0.6, 0.82)); accOpp = clamp01(rnd(0.55, 0.78)); }
-  const accClick = clamp01(rnd(0.02, 0.12));
-  const accHuman = clamp01(rnd(0.7, 0.9)); // human stories skew accurate/empathetic
-
+  if (scene.truth === 'ruling') { accGov = clamp01(srnd(rng, 0.9, 1)); accOpp = clamp01(srnd(rng, 0.25, 0.55)); }
+  else if (scene.truth === 'opposition') { accGov = clamp01(srnd(rng, 0.45, 0.72)); accOpp = clamp01(srnd(rng, 0.9, 1)); }
+  else { accGov = clamp01(srnd(rng, 0.62, 0.85)); accOpp = clamp01(srnd(rng, 0.57, 0.80)); }
+  const accClick = clamp01(srnd(rng, 0.05, 0.15));
+  const accHuman = clamp01(srnd(rng, 0.74, 0.9));
   return [
-    { key:'investigate', label:"Investigative Fact-Check", blurb:"Verify first; slower burn & higher costs.", align:0, sensational:0.12, accuracy:accInvestigate, effect:{ opinion:+1, trust:+6, reach:+18 } },
-    { key:'proGov',     label:`Government Line (Pro-${ruling})`, blurb:"Echo official stance for access.", align:+1, sensational:0.32, accuracy:accGov, effect:{ opinion:+3, trust:-2, reach:+36 } },
-    { key:'proOpp',     label:"Opposition Blast", blurb:"Lean hard into critics.", align:-1, sensational:0.65, accuracy:accOpp, effect:{ opinion:-2, trust:-5, reach:+62 } },
-    { key:'clickbait',  label:"Viral Clickbait", blurb:"Sensational, low truth; huge spike.", align:0, sensational:0.9, accuracy:accClick, effect:{ trust:-12, reach:+95 } },
-    { key:'human',      label:"Human Stories", blurb:"Faces & feelings; small audience; advertiser-sensitive.", align:0, sensational:0.15, accuracy:accHuman, effect:{ trust:+3, reach:+8 } },
+    { key:'investigate', label:"Investigative Fact-Check", story:"Checks facts; slower, higher cost; stabilizes license.", align:0, sensational:0.16, accuracy:accInvestigate, effect:{ opinion:+1, trust:+6, reach:+18 }, color:'from-sky-200 to-sky-100', emoji:'🕵️‍♀️' },
+    { key:'proGov',     label:`Govt Line (Pro-${ruling})`, story:`Eases pressure; reach up; trust may suffer.`, align:+1, sensational:0.45, accuracy:accGov, effect:{ opinion:+3, trust:-2, reach:+42 }, color:'from-emerald-200 to-emerald-100', emoji:'🏛️' },
+    { key:'proOpp',     label:"Opposition Blast", story:"Big reach; pressure/license risk if wrong.", align:-1, sensational:0.64, accuracy:accOpp, effect:{ opinion:-2, trust:-5, reach:+62 }, color:'from-rose-200 to-rose-100', emoji:'📢' },
+    { key:'clickbait',  label:"Viral Clickbait", story:"Max reach; very low accuracy; shadowban risk.", align:0, sensational:0.86, accuracy:accClick, effect:{ trust:-12, reach:+90 }, color:'from-yellow-200 to-yellow-100', emoji:'🔥' },
+    { key:'human',      label:"Human Stories", story:"Small reach; better trust; limited revenue.", align:0, sensational:0.18, accuracy:accHuman, effect:{ trust:+4, reach:+7 }, color:'from-purple-200 to-purple-100', emoji:'🧑‍🤝‍🧑' },
   ];
 }
 
-/* ==========================
-   Polarization model (NEW)
-   ========================== */
-/**
- * Polarization increases only when:
- *  - story is partisan (align !== 0), AND
- *  - accuracy is low (< 0.7). Sensationalism amplifies.
- * Otherwise:
- *  - Human stories: never increase; can gently reduce when accurate.
- *  - High accuracy neutral stories can reduce slightly.
- */
-function computePolDelta({ align, accuracy, sensational, key }) {
-  // Human stories calm society a bit when accurate
-  if (key === 'human') {
-    if (accuracy >= 0.8) return -2; // empathetic, calming
-    return 0; // never raises pol
+/* --------------------------- POLARIZATION & OFFERS --------------------------- */
+function computePolDelta({ align, accuracy, sensational, key, partisanStreak }) {
+  if (key === 'human') return accuracy >= 0.8 ? -2 : 0;
+  let delta = 0; const lowAcc = accuracy < 0.68; const hyped = sensational > 0.6;
+  if (align !== 0 && (lowAcc || hyped)) {
+    const base = (lowAcc && hyped) ? 10 : 6;
+    const lowTruthFactor = Math.ceil((0.68 - Math.min(accuracy,0.68)) * 16);
+    const hypeFactor     = Math.round(Math.max(0, sensational-0.6) * 10);
+    delta += base + lowTruthFactor + hypeFactor;
   }
-  // Partisan & low-accuracy drives polarization
-  if (align !== 0 && accuracy < 0.7) {
-    const lowTruthFactor = Math.ceil((0.7 - accuracy) * 15);  // 0..10-ish
-    const hypeFactor = Math.round(sensational * 6);           // 0..5-ish
-    return lowTruthFactor + hypeFactor;                       // positive bump
-  }
-  // High-accuracy neutral content can cool tempers
-  if (align === 0 && accuracy >= 0.9 && (key === 'investigate')) {
-    return -3;
-  }
-  return 0;
+  if (align !== 0 && partisanStreak >= 2) delta += Math.min(8, partisanStreak);
+  if (align === 0 && accuracy >= 0.9 && (key === 'investigate')) delta -= 3;
+  return delta;
+}
+function foreignFundingOffer(day, money, pressure){
+  if (day < 7) return null;
+  const trigger = (money < 0.8 * (45 + (day-1)*8)) || (pressure > 65);
+  if (!trigger) return null;
+  return {
+    cash: rint(60, 120),
+    trustPenalty: rint(8, 14),
+    pressurePenalty: rint(10, 18),
+    licensePenalty: rint(12, 20),
+    baseProbeChance: 0.25,
+    text: "Foreign patron offers covert funds for favorable slant. Big money — big risk."
+  };
 }
 
-/* ==========================
-   Lightweight self-tests (dev only)
-   ========================== */
-function runSelfTests(){
-  const fails = [];
-  // clamp
-  if (clamp01(1.2) !== 1) fails.push('clamp01 upper bound');
-  if (clamp01(-0.5) !== 0) fails.push('clamp01 lower bound');
-  if (clamp100(150) !== 100) fails.push('clamp100 upper bound');
-  if (clamp100(-5) !== 0) fails.push('clamp100 lower bound');
-
-  // opCost monotonicity early + plateau sanity
-  if (opCost(5, 100) <= opCost(4, 100)) fails.push('opCost should rise with day (early)');
-  if (opCost(4, 200) <= opCost(4, 100)) fails.push('opCost should rise with reach');
-  const base10 = opCost(10, 0), base11 = opCost(11, 0);
-  if (!(base11 - base10 <= 5)) fails.push('opCost base should plateau after day 10');
-
-  // switchParty sanity
-  if (switchParty('Party A') !== 'Party B' || switchParty('Party B') !== 'Party A') fails.push('switchParty should toggle A<->B');
-
-  // clickbait accuracy stays low
-  const anyOpts = buildOptions({truth:'neutral', title:'t'}, 'Party A');
-  const clickAcc = anyOpts.find(o=>o.key==='clickbait')?.accuracy ?? 1;
-  if (!(clickAcc >= 0 && clickAcc <= 0.2)) fails.push('clickbait accuracy should be low (<=20%)');
-
-  // NEW: polarization rules
-  const pol1 = computePolDelta({ align:+1, accuracy:0.5, sensational:0.6, key:'proGov' });
-  if (!(pol1 > 0)) fails.push('partisan + low accuracy should raise polarization');
-  const pol2 = computePolDelta({ align:0, accuracy:0.95, sensational:0.1, key:'investigate' });
-  if (!(pol2 < 0)) fails.push('high-accuracy neutral should reduce polarization slightly');
-  const pol3 = computePolDelta({ align:0, accuracy:0.85, sensational:0.2, key:'human' });
-  if (!(pol3 <= 0)) fails.push('human stories should not raise polarization');
-
-  if (fails.length) console.warn('[SelfTests]', fails);
+/* --------------------------- NEWSROOM (pool) --------------------------- */
+const NEWS_POOL = (() => {
+  const cats = ["crime","politics","science","sports","business","tech","world","culture","health","weather"];
+  const frames = [
+    "Arrests after late-night brawl downtown","Minister hints at audit; opposition protests","Researchers publish promising vaccine data",
+    "Home team clinches derby in tense finish","Bank CEO resigns amid inquiry","New app surges to #1, regulator uneasy",
+    "Border tensions ease after hotline call","Actor apologizes for viral remark","Hospital reports rare surgery success",
+    "Storm warnings as cyclone shifts course","Police foil alleged terror plot","Leaked memo fuels price rise worries",
+    "Whistleblower claims data mishandling","Court stays controversial eviction drive","Drone footage shows flood devastation",
+  ];
+  const pool = [];
+  for (let i=0;i<50;i++){
+    const cat = cats[i%cats.length];
+    const title = frames[i%frames.length];
+    const sensational = clamp01(rnd(0.2, 0.95));
+    const toneRoll = Math.random();
+    const tone = toneRoll < 0.55 ? 'negative' : toneRoll < 0.8 ? 'neutral' : 'positive';
+    pool.push({ id:`n${i}`, cat, title, sensational, tone });
+  }
+  return pool;
+})();
+function sampleNews(n=5){
+  const arr = [...NEWS_POOL];
+  arr.sort(()=> Math.random() - 0.5);
+  return arr.slice(0,n).map(n=> {
+    const base = n.sensational*0.6 + (n.tone==='negative'?0.4:(n.tone==='neutral'?0.2:0.05));
+    const perf = clamp01(base);
+    const points = [];
+    let v = rnd(0.2,0.7);
+    for (let i=0;i<14;i++){ v = clamp01(v + rnd(-0.08, 0.12) + (perf-0.5)*0.12); points.push(v); }
+    return { ...n, perf, points };
+  });
 }
 
-/* ==========================
-   Component
-   ========================== */
+/* --------------------------- SCORE --------------------------- */
+function impactScore({ trust, pol, license, money, reach, pressure }){
+  const lic = license ?? 100; const pr = pressure ?? 50;
+  const mBonus = Math.max(0, Math.min(8, Math.round(money/35)));
+  const rBonus = Math.max(0, Math.min(8, Math.round(reach/90)));
+  let s = 0; s += trust*0.30; s += (100-pol)*0.28; s += lic*0.25; s += (100-pr)*0.07; s += mBonus + rBonus;
+  return Math.max(0, Math.min(100, Math.round(s)));
+}
+
+/* --------------------------- SEGMENTED MONEY TARGETS --------------------------- */
+const SEGMENTS = [
+  { start:1, end:4 },
+  { start:5, end:8 },
+  { start:9, end:12 },
+  { start:13, end:16 },
+  { start:17, end:20 },
+];
+const currentSegment = (d)=> SEGMENTS.find(s => d>=s.start && d<=s.end) || SEGMENTS[0];
+function estimateSegmentTarget(segStartDay, segEndDay, reachAtStart, todayTarget){
+  const segLen = segEndDay - segStartDay + 1;
+  let opApprox = 0;
+  for (let i=0; i<segLen; i++){
+    opApprox += Math.round(opCost(segStartDay + i, reachAtStart) * 0.30);
+  }
+  const base = Math.round(todayTarget * 0.65 * segLen);
+  return Math.max(80, base + opApprox);
+}
+
+/* --------------------------- COMPONENT --------------------------- */
 export default function MediaNarrativeGame(){
-  // Day & Power
+  const sfx = useSfx();
+
+  // Day / rule
   const [day, setDay] = useState(1);
   const [ruling, setRuling] = useState('Party A');
   const [gameOver, setGameOver] = useState(null);
 
   // Society
-  const [opinion, setOpinion] = useState(50);
   const [pol, setPol] = useState(30);
+  const [polCrisisStreak, setPolCrisisStreak] = useState(0);
   const [trust, setTrust] = useState(65);
 
   // Company
   const [reach, setReach] = useState(0);
   const [money, setMoney] = useState(60);
 
-  // Governance unlock after Day 3
-  const [pressure, setPressure] = useState(null); // 0..100
-  const [license, setLicense] = useState(null);   // 0..100
+  // Governance
+  const [pressure, setPressure] = useState(null);
+  const [license, setLicense] = useState(null);
 
-  // Advertiser goodwill & reach stagnation
-  const [advA, setAdvA] = useState(0);
-  const [advB, setAdvB] = useState(0);
-  const [lowReachStreak, setLowReachStreak] = useState(0); // days below minimum gain
+  // Competitor
+  const [competitor, setCompetitor] = useState(25);
 
-  // Integrity counters
-  const [truthCount, setTruthCount] = useState(0);
-  const [influencedCount, setInfluencedCount] = useState(0);
+  // Behavior stats for persona
+  const [stats, setStats] = useState({
+    investigate: 0, proGov: 0, proOpp: 0, clickbait: 0, human: 0,
+    tempt: 0, foreign: 0, polCard: 0, scoopCard: 0
+  });
 
-  // Operating cost streak
+  // Streaks & flags
+  const [proGovStreak, setProGovStreak] = useState(0);
+  const [investigateStreak, setInvestigateStreak] = useState(0);
+  const [lowReachStreak, setLowReachStreak] = useState(0);
   const [needStreak, setNeedStreak] = useState(0);
+  const [scrutinyDays, setScrutinyDays] = useState(0);
+  const [shadowbanDays, setShadowbanDays] = useState(0);
+  const [foreignFundingCount, setForeignFundingCount] = useState(0);
 
-  // Last snapshot
-  const [last, setLast] = useState({ opinion:50, pol:30, trust:65, reach:0, money:60, pressure:null, license:null, score:0 });
+  // Inflation / targets
+  const [inflation, setInflation] = useState(4.0);
+  const [growthRate, setGrowthRate] = useState(dayGrowthRate(1));
+  const [targetIncrement, setTargetIncrement] = useState(Math.round(60*(inflation/100 + growthRate)));
+  const [dayStartMoney, setDayStartMoney] = useState(60);
 
-  // UI state
+  // SEGMENTED progress
+  const [segStartMoney, setSegStartMoney] = useState(60);
+  const [segEndDay, setSegEndDay] = useState(4);
+  const [segTarget, setSegTarget] = useState(estimateSegmentTarget(1,4,0, Math.round(60*(inflation/100 + growthRate))));
+
+  // Power cards
+  const [cardPolAvail, setCardPolAvail] = useState(true);
+  const [cardScoopAvail, setCardScoopAvail] = useState(true);
+  const [scoopPenaltyNextDay, setScoopPenaltyNextDay] = useState(false);
+
+  // UI
   const [intro, setIntro] = useState(true);
+  const [showInfo, setShowInfo] = useState(false);
+  const [showNewsroom, setShowNewsroom] = useState(false);
   const [preview, setPreview] = useState(null);
-  const [dayPopup, setDayPopup] = useState(null);
-  const [special, setSpecial] = useState(null); // big event overlay
+  const [acceptTempt, setAcceptTempt] = useState(false);
+  const [acceptForeign, setAcceptForeign] = useState(false);
+  const [shake, setShake] = useState(false);
 
-  // Special schedules
+  // Danger modal
+  const [dangerModal, setDangerModal] = useState(null);
+  const prevDangerRef = useRef({ trust:false, pol:false, money:false, license:false, pressure:false });
+
+  // EOD loader + summary
+  const [processing, setProcessing] = useState(null);
+  const [eod, setEod] = useState(null);
+
+  // Deltas
+  const [last, setLast] = useState({ trust:65, pol:30, reach:0, money:60, pressure:50, license:100 });
+
+  // Newsroom bulletin cache
+  const [bulletin, setBulletin] = useState(sampleNews(5));
+
+  // One-shot events
+  const [anchorUsed, setAnchorUsed] = useState(false);
+  const [strikeUsed, setStrikeUsed] = useState(false);
+  const [capexUsed, setCapexUsed] = useState(false);
+
+  // specials schedule
   const natDay = useMemo(()=> [9,10,11,12,13,14][Math.floor(Math.random()*6)], []);
+  const hateDay = useMemo(()=> rint(12,18), []);
+  const compFFDay = useMemo(()=> rint(13,19), []);
+  const scandal = (d)=> d===17;
   const isRecession = (d)=> d>=5 && d<=8;
   const techSupp = (d)=> d===16 || d===17;
-  const scandal = (d)=> d===17;
+  const normalizedHateDay = (hateDay===natDay || hateDay===17) ? hateDay+1 : hateDay;
+  const normalizedCompFF = (compFFDay===natDay || compFFDay===normalizedHateDay) ? compFFDay+1 : compFFDay;
 
-  // Current scene
+  const isForced = useMemo(()=> FORCED_DAYS.includes(day) || (day<=14 && (pressure??50)>=90 && Math.random()<0.25), [day, pressure]);
+
+  // scene & options — seeded RNG
   const scene = SCENES[(day-1)%SCENES.length];
-  const options = useMemo(()=> buildOptions(scene, ruling), [scene, ruling]);
+  const rng = useMemo(()=> makeRng(`${day}-${ruling}-${scene.title}`), [day, ruling, scene.title]);
+  const options = useMemo(()=> buildOptions(scene, ruling, rng), [scene, ruling, rng]);
 
-  // Derived
-  const score = useMemo(()=> computeScore({ trust, pol, license, money, reach, pressure }), [trust, pol, license, money, reach, pressure]);
-  const needToday = useMemo(()=> opCost(day, reach), [day, reach]);
+  // score (impact)
+  const baseScore = useMemo(()=> impactScore({ trust, pol, license, money, reach, pressure }), [trust, pol, license, money, reach, pressure]);
 
-  // run self-tests once in dev
-  useEffect(()=>{ runSelfTests(); }, []);
+  // infl / growth update per day flip
+  useEffect(()=>{
+    if (day===1) return;
+    const inf = nextInflation(inflation, day);
+    const gr = dayGrowthRate(day);
+    setInflation(inf);
+    setGrowthRate(gr);
+    const inc = Math.max(0, Math.round(money * (inf/100 + gr)));
+    setTargetIncrement(inc);
+    setDayStartMoney(money);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [day]);
 
-  function simulate(opt){
-    const truth = scene.truth; // 'ruling' | 'opposition' | 'neutral'
+  // INIT segment values at mount (Day 1..4)
+  useEffect(()=>{
+    const seg = currentSegment(1);
+    setSegStartMoney(money);
+    setSegEndDay(seg.end);
+    setSegTarget(estimateSegmentTarget(seg.start, seg.end, reach, targetIncrement));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // On hitting a new segment start (Day 5,9,13,17)
+  useEffect(()=>{
+    const seg = currentSegment(day);
+    if (day === seg.start){
+      setSegStartMoney(money);
+      setSegEndDay(seg.end);
+      setSegTarget(estimateSegmentTarget(seg.start, seg.end, reach, targetIncrement));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [day]);
+
+  // Confetti mini layer
+  const [confetti, setConfetti] = useState([]);
+  function makeConfettiBurst(){
+    const bits = Array.from({length: 28}).map((_,i)=> ({
+      id: `${Date.now()}_${i}`,
+      left: `${rint(10,90)}%`,
+      top: `${rint(10,40)}%`,
+      bg: ['#ef4444','#f59e0b','#10b981','#3b82f6','#a855f7','#ec4899'][i%6],
+      rotate: rint(0,360),
+      time: 600 + rint(0,500),
+    }));
+    setConfetti(bits);
+    setTimeout(()=> setConfetti([]), 1200);
+  }
+
+  /* --------------------------- SIMULATION CORE --------------------------- */
+  function computePol({ align, acc, sens, key }) {
+    return computePolDelta({ align, accuracy: acc, sensational: sens, key, partisanStreak: 0 });
+  }
+  function simulateBase(opt){
     const align = opt.align || 0;
     const acc = opt.accuracy ?? 1.0;
     const sens = opt.sensational ?? 0.05;
 
-    // Base effects
-    let nOpinion = clamp100(opinion + (opt.effect.opinion||0));
     let nTrust   = clamp100(trust + (opt.effect.trust||0));
+    let nPol     = clamp100(pol + computePol({ align, acc, sens, key: opt.key }));
 
-    // Polarization (NEW)
-    const polDelta = computePolDelta({ align, accuracy: acc, sensational: sens, key: opt.key });
-    let nPol = clamp100(pol + polDelta);
+    if (scandal(day)) { nPol = clamp100(nPol + (align!==0 ? 6 : 4) + (acc<0.6 ? 3 : 0)); nTrust = clamp100(nTrust + (acc>=0.8 ? +2 : -4)); }
 
-    // Natural disaster respect for accuracy
-    if (day===natDay){
-      if (acc>=0.85 && sens<=0.3) nTrust = clamp100(nTrust+8);
-      if (sens>=0.7 && acc<=0.4) nTrust = clamp100(nTrust-10);
-    }
-
-    // Scandal day spikes (emotions run hot regardless); accuracy tempers it
-    if (scandal(day)) {
-      const spike = (align!==0 ? 5 : 3) + (acc<0.6 ? 3 : 0);
-      nPol = clamp100(nPol + spike);
-      nTrust = clamp100(nTrust + (acc>=0.8 ? +2 : -3));
-    }
-
-    // Reach dynamics (base)
-    let rDelta = Math.round((opt.effect.reach||0)*0.6)
-               + Math.round((100-nTrust)*sens*0.25)
-               + (align===+1?+8:align===-1?+10:+5);
-
-    // Tech suppression
+    let rDelta = Math.round((opt.effect.reach||0)*0.6) + Math.round((100-nTrust)*sens*0.28) + (align===+1?+9:align===-1?+11:+6);
+    if (shadowbanDays>0 && rDelta>0) rDelta = Math.round(rDelta*0.5);
     if (techSupp(day) && rDelta>0) rDelta = Math.round(rDelta*0.5);
 
-    // Investigative special rules (decisive vs not)
     if (opt.key === 'investigate') {
       const decisive = acc >= 0.9;
-      if (decisive && truth === 'ruling') {
-        rDelta += 6;
-      } else if (decisive && truth === 'opposition') {
-        rDelta += (trust >= 60 ? 4 : 1);
-      } else {
-        rDelta += 1; // not decisive → small reach
-      }
+      if (decisive && scene.truth === 'ruling') rDelta += 6;
+      else if (decisive && scene.truth === 'opposition') rDelta += (trust >= 60 ? 4 : 1);
+      else rDelta += 1;
     }
+    if (opt.key==='human') rDelta = Math.max(-3, Math.min(6, rDelta));
+    if (acc >= 0.88) rDelta -= Math.max(2, Math.round((acc-0.85)*20));
 
-    // Human stories: small, steady; never inflate pol (already handled)
-    if (opt.key==='human'){
-      rDelta = Math.max(-3, Math.min(6, rDelta));
-    }
-
-    // Good Program: special action (costly, de-polarizing)
-    // We'll generate this opt outside options list; still simulated here:
-    if (opt.key==='goodProgram'){
-      // No opinion sway; reach small; trust up; pol down
-      const gpTrust = rint(6, 12);
-      const gpPol   = -rint(4, 8);
-      const gpReach = rint(1, 4);
-      nTrust = clamp100(nTrust + gpTrust);
-      nPol   = clamp100(nPol + gpPol);
-      rDelta += gpReach;
-    }
-
-    // Cost of Accuracy (slower publishing)
-    if (acc >= 0.88){
-      const slow = Math.max(2, Math.round((acc-0.85)*20));
-      rDelta -= slow;
-    }
-
-    // Money from reach vs avg + gov ads
     const avg = reach/Math.max(1,day-1);
-    let mDelta = (rDelta<=0? Math.round(rDelta*2.2) : rDelta<avg? -Math.round((avg-rDelta)*1.25) : Math.round(rDelta*1.05));
-
-    // Fact-check expense regardless of reach
-    if (opt.key === 'investigate' && acc >= 0.9) mDelta -= (8 + Math.round((acc-0.9)*28));
-
-    // Investigative: decisive money tweak
-    if (opt.key === 'investigate') {
+    let mDelta = (rDelta<=0? Math.round(rDelta*2.6) : rDelta<avg? -Math.round((avg-rDelta)*1.8) : Math.round(rDelta*0.95));
+    if (opt.key === 'investigate' && acc >= 0.9) mDelta -= (14 + Math.round((acc-0.9)*34));
+    if (opt.key === 'investigate'){
       const decisive = acc >= 0.9;
-      if (decisive && truth === 'ruling') {
-        mDelta += (Math.random() < 0.4 ? +3 : -2);
-      } else if (decisive && truth === 'opposition') {
-        mDelta -= 3;
-      } else {
-        mDelta -= 5;
-      }
+      if (decisive && scene.truth === 'ruling') mDelta += (Math.random() < 0.35 ? +3 : -6);
+      else if (decisive && scene.truth === 'opposition') mDelta -= 7;
+      else mDelta -= 9;
     }
+    if (opt.key==='human' && rDelta <= 1) mDelta -= 6;
 
-    // Human stories: advertisers tepid on tiny scale
-    if (opt.key==='human' && rDelta <= 1) mDelta -= 3;
-
-    // Good Program: explicit cost
-    if (opt.key==='goodProgram'){
-      const cost = rint(18, 35);
-      mDelta -= cost; // spend budget on outreach/editorial standards campaigns
+    // --- Pressure: assure easing for Pro-Gov (unless heavy negatives)
+    let pressureDelta = 0;
+    if (align===+1) pressureDelta -= Math.round(8 + 2*acc - 1.5*sens);
+    if (align===-1) pressureDelta += Math.round(12 + 2.5*sens - 1.8*acc);
+    if (acc>=0.9) { if (scene.truth==='opposition') pressureDelta += 6; if (scene.truth==='ruling') pressureDelta -= 6; }
+    if (money < opCost(day, reach)) pressureDelta += 7;
+    if (align===+1){
+      const heavy = (money < opCost(day, reach)-5) || ((acc < 0.5) && (sens > 0.6)) || scandal(day);
+      if (!heavy && pressureDelta > -2) pressureDelta = -2;
     }
+    let nPressure = clamp100((pressure??50) + pressureDelta);
 
-    if (isRecession(day)) {
-      mDelta = Math.round(mDelta*0.5);
-      nTrust = clamp100(trust + Math.round((nTrust-trust)*0.6));
-    }
-
-    // Governance / License
+    // --- License: eased penalties & better reward on Pro-Gov
     let licDelta = 0;
-    // Alignment helps/hurts only modestly; truth saves face
-    licDelta += (align===+1? (4+Math.round(acc*4)-Math.round(sens*2)) : align===-1? (-5 - Math.round(sens*2)) : 0);
-    if (acc >= 0.88){
-      if (truth==='opposition') licDelta -= 2;
-      else if (truth==='ruling') licDelta += 3;
+    if (align===-1 && (acc<0.7 || sens>0.6)) licDelta -= 8 + Math.round(4.5*sens); // was 10 + 5.5*sens
+    if (align===+1) licDelta += Math.max(0, 8 - Math.round(4.2*sens));            // was 6 - 4.8*sens
+    licDelta -= Math.max(0, nPressure - 56) * 0.5;                                  // was ×0.7
+    licDelta -= Math.max(0, 62 - nTrust) * 0.20;                                     // was ×0.28
+    if (acc>=0.92) licDelta += 2;                                                    // tiny reward
+    if (scrutinyDays>0) licDelta -= 4;                                               // was -6
+    let nLicense = clamp100((license??100) + Math.round(licDelta));
+
+    const forced = FORCED_DAYS.includes(day) || (day<=14 && (pressure??50)>=90 && Math.random()<0.25);
+    if (forced && opt.key !== 'proGov') {
+      const pHit = 20 + Math.round(5*sens) - Math.round(4*acc);
+      const lHit = 22 + Math.round(7*sens) - Math.round(5*acc);                      // lighter than before
+      nPressure = clamp100(nPressure + Math.max(12, pHit));
+      nLicense  = clamp100(nLicense - Math.max(14, lHit));                            // min 14 (was 18)
+      mDelta -= 10;
     }
-    const nextPressure = clamp100((pressure??50)); // pressure now changes elsewhere (publisher finances), not from generic systemic rule here
-    const nextLicense  = clamp100((license??100) + Math.round(licDelta));
 
-    // Government Ad stream
-    const govAd = Math.round((align===+1? +10 : align===-1? -12 : (truth==='ruling'&&acc>0.88? +5 : truth==='opposition'&&acc>0.88? -5 : 0)) * (isRecession(day)?0.5:1));
-    mDelta += govAd;
-
-    return {
-      align, acc, sens, key: opt.key,
-      nextTrust: nTrust,
-      nextPol: nPol,
-      nextOpinion: clamp100(nOpinion),
-      nextReach: reach + rDelta,
-      reachDelta: rDelta,
-      nextMoney: money + mDelta,
-      moneyDelta: mDelta,
-      nextPressure,
-      pressureDelta: Math.round(nextPressure - (pressure??50)),
-      nextLicense,
-      licenseDelta: Math.round(nextLicense - (license??100)),
-      truth,
-    };
+    return { align, acc, sens, key: opt.key, nextTrust:nTrust, nextPol:nPol, reachDelta:rDelta, moneyDelta:mDelta,
+             nextPressure:nPressure, pressureDelta: Math.round(nPressure - (pressure??50)),
+             nextLicense:nLicense, licenseDelta: Math.round(nLicense - (license??100)),
+             nextReach: reach + rDelta, nextMoney: money + mDelta };
   }
-
-  function advertiserPayout(sim, nextDay, lowStreak, dailyMin){
+  function simulate(opt, { tempt=false, foreign=null } = {}){
+    let sim = simulateBase(opt);
+    if (tempt) {
+      const t = { cash:rint(18,38), trustPenalty:rint(8,12), polPenalty:rint(8,12), pressurePenalty:rint(9,16), licenseRisk:rint(8,14) };
+      sim.nextMoney += t.cash;   sim.moneyDelta += t.cash;
+      sim.nextTrust = clamp100(sim.nextTrust - t.trustPenalty);
+      sim.nextPol   = clamp100(sim.nextPol   + t.polPenalty);
+      sim.nextPressure = clamp100(sim.nextPressure + t.pressurePenalty);
+      sim.pressureDelta += t.pressurePenalty;
+      sim.nextLicense  = clamp100(sim.nextLicense  - (t.licenseRisk + (sim.nextPressure>70 ? 4 : 0)));
+      sim.licenseDelta -= (t.licenseRisk + (sim.nextPressure>70 ? 4 : 0));
+    }
+    if (foreign){
+      const baseProbe = foreign.baseProbeChance + foreignFundingCount*0.12;
+      sim.nextMoney += foreign.cash; sim.moneyDelta += foreign.cash;
+      sim.nextTrust = clamp100(sim.nextTrust - foreign.trustPenalty);
+      sim.nextPressure = clamp100(sim.nextPressure + foreign.pressurePenalty);
+      sim.nextLicense = clamp100(sim.nextLicense - foreign.licensePenalty);
+      const willProbe = Math.random() < baseProbe;
+      if (willProbe){
+        const L = rint(24,34), T = rint(16,28), P = rint(10,16); // slight license ease
+        sim.nextLicense = clamp100(sim.nextLicense - L);
+        sim.licenseDelta -= L;
+        sim.nextTrust = clamp100(sim.nextTrust - T);
+        sim.nextPol = clamp100(sim.nextPol + P);
+      }
+      setForeignFundingCount(x=> x+1);
+    }
+    return sim;
+  }
+  function advertiserPayout(sim, nextDay, lowStreak, comp, currPol){
     if (nextDay%3!==0) return { carry:0, events:[] };
     const pR = (ruling==='Party A'? AD_SUPPORT.A: AD_SUPPORT.B);
     const pO = (ruling==='Party A'? AD_SUPPORT.B: AD_SUPPORT.A);
     const pA = AD_SUPPORT.AGN;
 
-    let A = advA, B = advB;
+    let A = 0, B = 0;
     if (sim.align===+1) { A += 6; B -= 4; }
-    else if (sim.align===-1) { A -= 6; B += 6; }
+    else if (sim.align===-1) { A -= 8; B += 8; }
     else { A += 1; B += 1; }
-    if (Math.round((sim.acc??0)*100)<55 || (sim.nextPressure??50)>65) { A -= 4; B -= 4; }
+    if (Math.round((sim.acc??0)*100)<60 || (sim.nextPressure??50)>65) { A -= 7; B -= 7; }
+    A = Math.max(-100, Math.min(100, A)); B = Math.max(-100, Math.min(100, B));
 
-    A = Math.max(-100, Math.min(100, A));
-    B = Math.max(-100, Math.min(100, B));
-
-    const events = [];
-    let carry = 0;
-
-    const Aactive = A > PULL_OUT_THRESHOLD;
-    const Bactive = B > PULL_OUT_THRESHOLD;
-    if (!Aactive) events.push({text:"Major Party-A advertisers have pulled out."});
-    if (!Bactive) events.push({text:"Major Party-B advertisers have pulled out."});
-
-    const baseBudget = isRecession(nextDay)? 24 : 42;
-    const pAgn = pA * (baseBudget*0.4);
-    if (Aactive) carry += Math.round(pR * (baseBudget + A*0.2));
-    if (Bactive) carry += Math.round(pO * (baseBudget + B*0.2));
+    const events = []; let carry = 0;
+    const baseBudget = isRecession(nextDay)? 20 : 38;
+    const pAgn = pA * (baseBudget*0.32);
+    carry += Math.round(pR * (baseBudget + A*0.2));
+    carry += Math.round(pO * (baseBudget + B*0.2));
     carry += Math.round(pAgn);
 
-    // Alignment penalty
-    if (sim.align===-1) carry = Math.round(carry*0.7);
+    if (sim.align===-1) carry = Math.round(carry*0.62);
+    if (lowStreak >= 2) { carry = Math.round(carry*0.58); events.push({text:`Advertisers cut for weak reach streak (${lowStreak}).`}); }
+    if (shadowbanDays>0) carry = Math.round(carry*0.7);
+    if (comp >= 60) carry = Math.round(carry*0.82);
+    if (currPol >= 100) { carry = Math.round(carry*1.35); events.push({text:'High polarization bonus (+35%).'}); }
+    else if (currPol >= 90) { carry = Math.round(carry*1.2); events.push({text:'Polarization bonus (+20%).'}); }
 
-    // Reach stagnation cuts (2+ days below daily minimum gain)
-    if (lowStreak >= 2) { carry = Math.round(carry*0.7); events.push({text:`Advertisers cut 30% due to weak reach for ${lowStreak} days (min +${dailyMin}).`}); }
-    if (lowStreak >= 3) { carry = Math.round(carry*0.5); events.push({text:'Severe advertiser cuts: reach stagnation persists.'}); }
-
-    // Human stories tiny scale penalty
-    if (sim.key==='human' && sim.reachDelta <= 2) { carry -= 5; events.push({text:'Human-interest focus had limited scale — ad adjustment (−$5).'}); }
-
-    return { carry, events, A, B };
+    return { carry, events };
+  }
+  function investorPenalty(reachDelta, nextDay){
+    let min = 14 + Math.floor(nextDay * 0.8) + (shadowbanDays>0 ? 4 : 0) + (scrutinyDays>0 ? 3 : 0);
+    if (nextDay>10) min += 4;
+    if ((reachDelta ?? 0) >= min) return 0;
+    const gap = min - (reachDelta ?? 0);
+    return -(6 + Math.ceil(gap / 2));
   }
 
-  function computeScore({ trust, pol, license, money, reach, pressure }){
-    const lic = license ?? 100; const pr = pressure ?? 50;
-    const mBonus = Math.max(0, Math.min(12, Math.round(money/25)));
-    const rBonus = Math.max(0, Math.min(8, Math.round(reach/90)));
-    let s = 0; s += trust*0.35; s += (100-pol)*0.25; s += lic*0.25; s += (100-pr)*0.05; s += mBonus + rBonus; return Math.max(0, Math.min(100, Math.round(s)));
+  function openPreview(opt){
+    sfx.click();
+    const sim0 = simulate(opt, { tempt:false, foreign:null });
+    setPreview({ opt, sim: sim0 });
+    setAcceptTempt(false); setAcceptForeign(false);
   }
 
-  function legacy(){
-    if (license!==null && license<=0) return { title:"License Revoked", desc:"Sustained pressure and risky coverage ended operations." };
-    if (needStreak>=3) return { title:"Out of Cash", desc:"Operating costs outpaced revenue three days running." };
-    if (trust<8) return { title:"Public Backlash", desc:"Trust collapsed after repeated low-accuracy stories." };
-    if (reach>900 && money>400 && trust<40) return { title:"Click Empire", desc:"Massive reach, little truth." };
-    if (trust>=70 && (license??100)>=60 && pol<=55) return { title:"People's Watchdog", desc:"High-integrity, sustainable press." };
-    return { title:"City Staple", desc:"You kept the lights on through storms and spin." };
+  /* ---------- EOD: compute/apply ---------- */
+  function computeEOD(sel, sim){
+    const nextDay = day+1;
+    let nMoney = sim.nextMoney;
+    let nReach = sim.nextReach;
+    let nTrust = sim.nextTrust;
+    let nPol   = sim.nextPol;
+    let nPressure = sim.nextPressure;
+    let nLicense  = sim.nextLicense;
+    const notes = [];
+
+    const dailyMin = Math.max(12, 16 + Math.floor(day*0.9));
+    const lr = (sim.reachDelta ?? 0) < dailyMin ? lowReachStreak + 1 : 0;
+    if (lr>=2) notes.push({ kind:'warn', text:`Low reach streak (${lr}) — ad budgets trim.` });
+
+    const { carry } = advertiserPayout(sim, nextDay, lr, competitor, nPol);
+    if (carry!==0) notes.push({ kind: carry>0?'good':'bad', text:`Advertiser payout ${sign(carry)}$${Math.abs(carry)}.` });
+    nMoney += carry;
+
+    if (nextDay > 7){
+      const inv = investorPenalty(sim.reachDelta, nextDay);
+      if (inv<0) notes.push({kind:'bad', text:`Investor pushback ${inv}. Missed growth expectations.`});
+      nMoney += inv;
+    }
+
+    if (nextDay===normalizedHateDay){ const p=rint(12,18), t=rint(1,4); nPol = clamp100(nPol + p); nTrust = clamp100(nTrust - t); notes.push({kind:'event', text:`Hate speech incident: Polarization +${p}, Trust -${t}.`}); }
+    if (nextDay===normalizedCompFF){ const L=Math.floor((nLicense??100)/2), p=rint(8,14); nLicense = clamp100(L); nPressure = clamp100((nPressure??50)+p); notes.push({kind:'event', text:`Competitor foreign funding: License halved, Pressure +${p}.`}); }
+    if (nextDay===natDay){ const cost=rint(25,45), r=rint(8,16); nMoney = Math.max(0, nMoney - cost); nReach = Math.max(0, nReach - r); notes.push({kind:'event', text:`Natural disaster: Coverage costs -$${cost}, Reach -${r}.`}); }
+
+    if (!anchorUsed && nextDay>=6 && Math.random()<0.28){
+      const t=rint(15,30), r=rint(6,14); nTrust = clamp100(nTrust - t); nReach += r; nPressure = clamp100((nPressure??50)+4); nLicense = clamp100((nLicense??100)-3);
+      notes.push({kind:'event', text:`Anchor's viral Insta rant: Trust -${t}, Reach +${r}, Pressure +4, License -3.`});
+      setAnchorUsed(true);
+    }
+    const todayEarn = nMoney - money;
+    if (!strikeUsed && (todayEarn > targetIncrement*1.6 || nMoney > 220)){
+      const hit = Math.round(nMoney * 0.35); nMoney = Math.max(0, nMoney - hit); nPressure = clamp100((nPressure??50)+8);
+      notes.push({kind:'event', text:`Union strike: payout & legal fees -$${hit}, Pressure +8.`});
+      setStrikeUsed(true);
+    }
+    if (!capexUsed && nMoney > 260){
+      const before = nMoney; nMoney = Math.floor(nMoney/2);
+      notes.push({kind:'event', text:`Board buys new studio: treasury from $${before} → $${nMoney}.`});
+      setCapexUsed(true);
+    }
+    if (scoopPenaltyNextDay && competitor>=60){
+      nTrust = clamp100(nTrust - 10);
+      notes.push({kind:'event', text:`Competitor counter-scoop: Trust -10.`});
+    }
+
+    const hitTarget = todayEarn >= targetIncrement;
+    if (!hitTarget){
+      nPressure = clamp100((nPressure??50) + rint(8,14));
+      nLicense  = clamp100((nLicense??100) - rint(4,8));      // eased end-of-day license hit
+      notes.push({kind:'bad', text:`Missed daily goal by $${Math.max(0, targetIncrement - todayEarn)} → Pressure ↑, License ↓.`});
+    } else {
+      notes.push({kind:'good', text:`Met daily goal (+$${todayEarn}).`});
+    }
+
+    if (sel.key==='proGov' && proGovStreak>=1){ const t=rint(5,10), m=rint(6,12); nTrust = clamp100(nTrust - t); nMoney -= m; notes.push({kind:'bad', text:`Viewers tire of pro-gov line: Trust -${t}, Money -${m}.`}); }
+    if (sel.key==='investigate' && investigateStreak>=1){ const m=rint(10,18); nMoney -= m; notes.push({kind:'bad', text:`Investigations fatigue: extra fact-check costs -$${m}.`}); }
+
+    let reason = null;
+    if ((nextDay>=4 && nLicense<=0)) reason = 'License revoked';
+    else if (needStreak>=2 && nMoney < opCost(nextDay, nReach)) reason = 'Unable to meet operating costs';
+    else if (nTrust<5) reason = 'Public trust collapsed';
+    else if (polCrisisStreak + (nPol>=100?1:0) >= 3) reason = 'Society crisis (Polarization 100 for 3 days)';
+
+    return {
+      nextDay,
+      nextVals: { money:nMoney, reach:nReach, trust:nTrust, pol:nPol, pressure:nPressure, license:nLicense },
+      deltas: {
+        money: nMoney - money, reach: nReach - reach, trust: nTrust - trust, pol: nPol - pol,
+        pressure: (nPressure??50) - (pressure??50),
+        license: (nLicense??100) - (license??100),
+      },
+      hitTarget, notes, reason,
+      lr
+    };
   }
 
   function publish(){
     if (!preview) return;
-    const sim = preview.sim;
+    setLast({ trust, pol, reach, money, pressure: (pressure??50), license: (license??100) });
 
-    setLast({ opinion, pol, trust, reach, money, pressure, license, score });
+    const sel = preview.opt;
+    const ff = acceptForeign ? foreignFundingOffer(day, money, pressure??50) : null;
+    let sim = simulate(sel, { tempt: acceptTempt, foreign: ff });
 
-    let nTrust = sim.nextTrust; let nPol = sim.nextPol; let nOpinion = sim.nextOpinion;
-    let nReach = sim.nextReach; let nMoney = sim.nextMoney;
-    let nPressure = pressure; let nLicense = license;
+    // track behavior stats
+    setStats(s => ({
+      ...s,
+      [sel.key]: (s[sel.key] ?? 0) + 1,
+      tempt: s.tempt + (acceptTempt ? 1 : 0),
+      foreign: s.foreign + (ff ? 1 : 0),
+    }));
 
-    const nextDay = day+1;
-    const events = [];
+    if (sel.key==='proGov'){ setProGovStreak(s=> s+1); setInvestigateStreak(0); }
+    else if (sel.key==='investigate'){ setInvestigateStreak(s=> s+1); setProGovStreak(0); }
+    else { setProGovStreak(0); setInvestigateStreak(0); }
 
-    // Integrity tracking
-    const topAcc = Math.max(...options.map(o=> o.accuracy ?? 0));
-    if (preview.opt.key !== 'goodProgram' && (preview.opt.accuracy ?? 0) >= topAcc - 0.01) setTruthCount(x=>x+1);
-    const underPressure = (money < opCost(day, reach)) || ((pressure??50) > 65) || ((license??100) < 60);
-    if (!(preview.opt.accuracy >= (topAcc - 0.01)) && underPressure && preview.opt.key !== 'goodProgram') setInfluencedCount(x=>x+1);
+    const frames = [
+      { art:"📰", text:"Copy desk polishing headlines..." },
+      { art:"📡", text:"Producers lining up guests and lower-thirds..." },
+      { art:"🎛️", text:"Control room checks… mic, IFB, roll VT..." },
+      { art:"📈", text:"Sales watching the live dashboard spike..." },
+      { art:"🧪", text:"Fact desk re-running the attribution queries..." },
+    ];
+    setProcessing({ lines: frames.sort(()=>Math.random()-0.5).slice(0,3), art: frames[0].art });
+    sfx.whoosh();
 
-    if (nextDay>=4){
-      nPressure = sim.nextPressure; nLicense = sim.nextLicense;
-      if (pressure===null) events.push({text:'Political Pressure metric unlocked.'});
-      if (license===null) events.push({text:'Media License metric unlocked.'});
-    }
+    setTimeout(()=> {
+      setProcessing(null);
+      const summary = computeEOD(sel, sim);
+      setEod({ ...summary, selection: sel, sim });
+      setPreview(null);
+    }, 2200);
+  }
 
-    if (nextDay===4 || nextDay===8 || nextDay===12){
-      const newR = switchParty(ruling); events.push({text:`${newR} forms government.`}); setRuling(newR);
-    }
+  function confirmEOD(){
+    if (!eod) return;
+    const { nextDay, nextVals, hitTarget, reason, lr } = eod;
 
-    if (nextDay===5) { events.push({text:'Recession begins — ad budgets shrink (Days 5–8).'}); setSpecial({title:'Recession Begins', body:'Ad budgets shrink, money gains halved, trust swings dampened.', day: nextDay}); }
-    if (nextDay===9) { events.push({text:'Recession ends — slow recovery begins.'}); }
-    if (nextDay===15) { events.push({text:'Tech Ban — reach gains halved on Days 16–17.'}); setSpecial({title:'Tech Ban Announced', body:'Platforms throttle distribution. Expect lower reach tomorrow and the day after.', day: nextDay}); }
-    if (nextDay===17) { events.push({text:'National Scandal — trust swings amplified; polarisation surges.'}); setSpecial({title:'National Scandal', body:'Polarisation reacts strongly. Accuracy matters more than ever.', day: nextDay}); }
-    if (nextDay===natDay) { events.push({text:'Natural Disaster — accuracy & empathy valued today.'}); setSpecial({title:'Natural Disaster', body:'High-accuracy, low-sensational coverage builds trust. Exploitation backfires.', day: nextDay}); }
-
-    // Reach growth requirement (influences advertisers)
-    const dailyMin = Math.max(8, 10 + Math.floor(day*0.6));
-    let lr = lowReachStreak;
-    if ((sim.reachDelta ?? 0) < dailyMin) lr += 1; else lr = 0;
-    setLowReachStreak(lr);
-
-    // Advertiser payout
-    const { carry, events:advEvts, A, B } = advertiserPayout(sim, nextDay, lr, dailyMin);
-    if (advEvts.length) advEvts.forEach(e=> events.push(e));
-    if (carry!==0) events.push({text: carry>0? `Advertisers: payout scheduled +$${carry}` : `Advertisers: cuts scheduled $${carry}`});
-    setAdvA(A??advA); setAdvB(B??advB);
-    nMoney += carry;
-
-    // Investor expectations (AFTER day 10): if reach gain is too low, money penalty
-    if (nextDay > 10) {
-      const investorMinGain = 8 + Math.floor(nextDay * 0.3); // expectation of daily growth
-      if ((sim.reachDelta ?? 0) < investorMinGain) {
-        const gap = investorMinGain - (sim.reachDelta ?? 0);
-        const investorPenalty = -(2 + Math.ceil(gap / 3)); // scales with shortfall
-        nMoney += investorPenalty;
-        events.push({text:`Investors disappointed: reach grew +${sim.reachDelta ?? 0} (expected +${investorMinGain}). Penalty ${investorPenalty}.`});
-      }
-      events.push({text:"Fixed cost is covered now, but investors are expecting returns."});
-    }
-
-    // Operating cost check and money-pressure link
-    const need = opCost(nextDay, nReach);
-    let ns = needStreak;
-    if (nMoney < need) {
-      ns += 1; events.push({text:`Operating shortfall: needed $${need}, have $${nMoney} (${ns}/3).`});
-      if (nextDay>=4){ const bump = rint(5,9); nPressure = clamp100((nPressure??50) + bump); events.push({text:`Financial vulnerability raises pressure (+${bump}).`}); }
-    } else ns = 0;
-
-    setNeedStreak(ns);
-
-    setOpinion(nOpinion); setPol(nPol); setTrust(nTrust); setReach(nReach); setMoney(nMoney);
-    setPressure(nPressure); setLicense(nLicense);
-
-    let reason = null;
-    if ((nextDay>=4 && nLicense<=0)) reason = 'License revoked';
-    else if (ns>=3) reason = 'Unable to meet operating costs';
-    else if (nTrust<5) reason = 'Public trust collapsed';
-    else if (nPol>=100) reason = 'Society crisis (Polarisation 100)';
-
+    setMoney(nextVals.money); setReach(nextVals.reach); setTrust(nextVals.trust); setPol(nextVals.pol); setPressure(nextVals.pressure); setLicense(nextVals.license);
     setDay(nextDay);
-    setPreview(null);
+    setDayStartMoney(nextVals.money);
+    setLowReachStreak(lr || 0);
 
-    setDayPopup({ day: nextDay, need, summary: {
-      reachDelta: nReach-last.reach,
-      moneyDelta: nMoney-last.money,
-      trustDelta: nTrust-last.trust,
-      polDelta: nPol-last.pol,
-      pressureDelta: (pressure!==null||nextDay>=4)? (nPressure-(pressure??50)) : null,
-      licenseDelta: (license!==null||nextDay>=4)? (nLicense-(license??100)) : null,
-    }, events, gameOver: reason });
+    const needNext = opCost(nextDay, nextVals.reach);
+    setNeedStreak(s => (nextVals.money < needNext ? s+1 : 0));
 
+    if (hitTarget) { makeConfettiBurst(); sfx.success(); } else { setShake(true); setTimeout(()=> setShake(false), 450); sfx.fail(); }
+
+    if (nextDay===4 || nextDay===8 || nextDay===12) setRuling(switchParty(ruling));
+    if (scoopPenaltyNextDay) setScoopPenaltyNextDay(false);
+
+    if (nextVals.pol >= 100) setPolCrisisStreak(x=> x+1); else setPolCrisisStreak(0);
+
+    setBulletin(sampleNews(5));
     if (reason) setGameOver(reason);
+    if (nextDay > MAX_DAY) setGameOver("Season complete");
+    setEod(null);
   }
 
   function reset(){
     setDay(1); setRuling('Party A'); setGameOver(null);
-    setOpinion(50); setPol(30); setTrust(65);
-    setReach(0); setMoney(60);
-    setPressure(null); setLicense(null);
-    setAdvA(0); setAdvB(0); setLowReachStreak(0);
-    setTruthCount(0); setInfluencedCount(0);
-    setNeedStreak(0);
-    setLast({ opinion:50, pol:30, trust:65, reach:0, money:60, pressure:null, license:null, score:0 });
-    setIntro(true); setPreview(null); setDayPopup(null); setSpecial(null);
+    setPol(30); setPolCrisisStreak(0); setTrust(65);
+    setReach(0); setMoney(60); setPressure(null); setLicense(null);
+    setLowReachStreak(0); setNeedStreak(0); setProGovStreak(0); setInvestigateStreak(0);
+    setScrutinyDays(0); setShadowbanDays(0); setForeignFundingCount(0);
+    setInflation(4.0); setGrowthRate(dayGrowthRate(1)); setTargetIncrement(Math.round(60*((4.0/100)+dayGrowthRate(1)))); setDayStartMoney(60);
+    setSegStartMoney(60); setSegEndDay(4); setSegTarget(estimateSegmentTarget(1,4,0, Math.round(60*((4.0/100)+dayGrowthRate(1)))));
+    setPreview(null); setIntro(true); setShowInfo(false); setLast({trust:65, pol:30, reach:0, money:60, pressure:50, license:100});
+    setCardPolAvail(true); setCardScoopAvail(true); setScoopPenaltyNextDay(false);
+    setBulletin(sampleNews(5));
+    setAnchorUsed(false); setStrikeUsed(false); setCapexUsed(false);
+    setStats({ investigate:0, proGov:0, proOpp:0, clickbait:0, human:0, tempt:0, foreign:0, polCard:0, scoopCard:0 });
+    setProcessing(null); setEod(null);
   }
 
-  const d = {
-    opinion: opinion - last.opinion,
-    pol: pol - last.pol,
-    trust: trust - last.trust,
-    reach: reach - last.reach,
-    money: money - last.money,
-    pressure: pressure!=null && last.pressure!=null? pressure-last.pressure : null,
-    license: license!=null && last.license!=null? license-last.license : null,
-    score: score - last.score,
+  // deltas for on-board display
+  const deltas = {
+    trust: trust - (last.trust ?? trust),
+    pol: pol - (last.pol ?? pol),
+    reach: reach - (last.reach ?? reach),
+    money: money - (last.money ?? money),
+    pressure: (pressure??50) - (last.pressure ?? (pressure??50)),
+    license: (license??100) - (last.license ?? (license??100)),
   };
 
-  const bg = (license!==null && license<=30)? 'from-rose-50 to-rose-100' : (pressure!==null && pressure>=70) || trust<=35? 'from-amber-50 to-yellow-100' : 'from-emerald-50 to-green-100';
-  const ended = gameOver || day>MAX_DAY || needStreak>=3;
+  // segmented money gauge
+  const segEarned = money - segStartMoney;
+  const segPct = clamp100(Math.round((segEarned / Math.max(1, segTarget)) * 100));
 
-  /* ==========================
-     Render
-     ========================== */
-  // Build Good Program pseudo-option for preview/publish
-  const goodProgramOpt = useMemo(()=>({
-    key: 'goodProgram',
-    label: 'Run Good Program (Community Outreach)',
-    blurb: 'Costs money, boosts trust, cools polarization.',
-    align: 0, sensational: 0.05, accuracy: 1.0,
-    effect: { trust: 0, reach: 0 }, // actual effects applied inside simulate
-  }), []);
+  // Danger flags
+  const danger = {
+    trust: trust < 10,
+    pol:   pol >= 95,
+    money: money < opCost(day, reach) || needStreak >= 2,
+    license: (license ?? 100) <= 15,
+    pressure: (pressure ?? 50) >= 85,
+  };
 
+  // Danger prompt (fires on first entry to danger zone)
+  useEffect(()=>{
+    if (intro || processing || eod || preview) return;
+    const newly = [];
+    const prev = prevDangerRef.current;
+    if (danger.trust && !prev.trust) newly.push({k:'Trust', text:'Trust is critically low. Avoid hype/low-accuracy; consider Human Stories or solid Investigations.'});
+    if (danger.pol && !prev.pol) newly.push({k:'Polarization', text:'Society is near crisis. Neutral/human pieces reduce heat; avoid hyped partisan takes.'});
+    if (danger.money && !prev.money) newly.push({k:'Money', text:'Below operating cost. You need short-term revenue; reach matters for ads.'});
+    if (danger.license && !prev.license) newly.push({k:'License', text:'License at risk. High-accuracy or pro-gov coverage can stabilize it.'});
+    if (danger.pressure && !prev.pressure) newly.push({k:'Pressure', text:'Political pressure is very high. Pro-gov or decisive true stories can ease it.'});
+    if (newly.length){
+      setDangerModal(newly);
+      sfx.alert();
+    }
+    prevDangerRef.current = danger;
+  }, [danger, intro, processing, eod, preview, sfx]);
+
+  const forcedWarn = isForced ? 'Forced day: non-pro-gov options are punished.' : null;
+
+  /* --------------------------- RENDER --------------------------- */
   return (
-    <div className={`min-h-screen p-6 font-sans bg-gradient-to-b ${bg}`}>
-      {/* Header */}
-      <header className="flex justify-between mb-6">
-        <div>
-          <h1 className="text-2xl font-extrabold flex items-center gap-2">
-            <Megaphone className="w-6 h-6" />
-            Media Narrative
-          </h1>
-          <p className="text-sm text-gray-700">Day {day}/{MAX_DAY} · Ruling: <span className="font-semibold">{ruling}</span></p>
-          <p className="text-xs text-gray-600">Truth, power, and payroll rarely align. Survive the cycle.</p>
+    <div className="min-h-screen p-6 bg-gradient-to-b from-fuchsia-50 via-sky-50 to-emerald-50">
+      <FunStyles />
+      <header className="mb-4 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Megaphone className="w-7 h-7 text-fuchsia-600" />
+          <h1 className="text-2xl font-black tracking-tight">Media Narrative</h1>
+          <span className="badge ml-2 px-2 py-0.5 rounded-full text-xs font-semibold bg-black text-white">arcade</span>
         </div>
-        <button onClick={reset} className="border px-4 py-2 rounded-2xl text-sm flex items-center gap-2">
-          <RefreshCcw className="w-4 h-4" />
-          Restart
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={()=> setShowNewsroom(true)} className="px-3 py-1.5 rounded-xl text-sm border bg-white hover:bg-gray-50 flex items-center gap-1"><Newspaper className="w-4 h-4"/> Newsroom Data</button>
+          <button onClick={()=>setShowInfo(true)} className="px-3 py-1.5 rounded-xl text-sm border bg-white hover:bg-gray-50 flex items-center gap-1"><Info className="w-4 h-4"/> Info</button>
+          <button onClick={reset} className="px-3 py-1.5 rounded-xl text-sm border bg-white hover:bg-gray-50 flex items-center gap-1"><RefreshCcw className="w-4 h-4"/> Restart</button>
+        </div>
       </header>
 
-      {/* Impact bar */}
-      <section className="mb-4">
-        <div className="p-4 border rounded-2xl bg-white/90">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <Target className="w-5 h-5" />
-              <div>
-                <div className="text-sm text-gray-600">Impact Score</div>
-                <div className="text-2xl font-extrabold tabular-nums">{Math.round(score)}</div>
+      {/* Event panel */}
+      <div className="comic rounded-3xl p-4 mb-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="text-3xl" style={{animation:'floaty 4s ease-in-out infinite'}}>{scene.art}</div>
+            <div>
+              <h3 className="text-xl font-extrabold">{scene.title}</h3>
+              <div className="text-xs text-gray-600 flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded-full bg-indigo-600 text-white">{scene.badge}</span>
+                <span>Day <strong>{day}</strong> / {MAX_DAY} • Ruling: <strong>{ruling}</strong></span>
+                {forcedWarn && <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300">{forcedWarn}</span>}
               </div>
             </div>
-            <div className={`text-lg font-bold ${ (d.score??0) >=0 ? 'text-emerald-700':'text-rose-700'}`}>{sign(d.score)}{Math.abs(Math.round(d.score||0))}</div>
           </div>
-          <div className="mt-3 h-2 rounded-full bg-gray-100 overflow-hidden">
-            <div className="h-full bg-black" style={{ width: `${Math.max(0, Math.min(100, score))}%` }} />
-          </div>
-          <div className="mt-2 text-xs text-gray-600">Goal: Reach Day {MAX_DAY} with Impact ≥ 75 and License ≥ 50 — without going broke.</div>
+          <div className="text-xs text-gray-600">Inflation {inflation.toFixed(1)}% • Today goal +${targetIncrement}</div>
         </div>
-      </section>
-
-      {/* Stats */}
-      <div className="grid gap-5 mb-8">
-        <section className="p-4 border rounded-2xl bg-white/70">
-          <div className="text-xs text-gray-500 mb-2">Society</div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <Stat label="Narrative Lean" value={opinion} delta={d.opinion} icon={Target}/>
-            <Stat label="Polarization" value={pol} delta={d.pol} icon={AlertTriangle} badWhenUp crisisNote sub="0 calm — 100 crisis (society goes crazy)" subBad={pol>=90} highAlert={pol>=85} />
-            <Stat label="Public Trust" value={trust} delta={d.trust} icon={ThumbsUp}/>
-          </div>
-        </section>
-        <section className="p-4 border rounded-2xl bg-white/70">
-          <div className="text-xs text-gray-500 mb-2">Your Company</div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Stat label="Reach" value={reach} delta={d.reach} icon={Gauge}/>
-            <Stat label="Money" value={money} delta={d.money} icon={DollarSign} money sub={`Need ≥ $${needToday}  (shortfall ${needStreak}/3)`} subBad={money<needToday}/>
-          </div>
-        </section>
-        {(pressure!=null || license!=null) && (
-          <section className="p-4 border rounded-2xl bg-white/70">
-            <div className="text-xs text-gray-500 mb-2">Governance</div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {pressure!=null && <Stat label="Political Pressure" value={pressure} delta={d.pressure} icon={Landmark} badWhenUp highAlert={pressure>=85}/>} 
-              {license!=null && <Stat label="Media License" value={license} delta={d.license} icon={Landmark}/>} 
-            </div>
-          </section>
-        )}
       </div>
 
-      {/* Scene & Options */}
-      {(!ended) && (
-        <div className="p-5 border rounded-2xl bg-white">
-          <div className="flex items-center justify-between mb-2">
-            <h2 className="font-bold text-lg">{scene.title}</h2>
-            <div className="text-xs text-gray-500">(Ground truth today: {scene.truth})</div>
+      {/* Gauges */}
+      <div className="grid md:grid-cols-2 gap-4 mb-4">
+        <GlassCard>
+          <div className="flex items-center justify-between mb-1">
+            <div className="flex items-center gap-2"><GaugeIcon className="w-5 h-5 text-emerald-600"/><div className="text-sm text-gray-700">Impact Score</div></div>
+            <div className="text-lg font-bold text-emerald-700">{baseScore}/100</div>
           </div>
-          <p className="text-sm text-gray-800 mb-3 font-medium">Choose <span className="underline">ONE</span> of the following five narratives to publish today:</p>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {options.map((opt, i)=> (
-              <button key={i} onClick={()=> setPreview({ opt, sim: simulate(opt) })} className="border rounded-2xl p-4 text-left shadow-md hover:shadow-xl hover:scale-[1.01] transition-transform">
-                <div className="font-semibold mb-2 text-lg">{opt.label}</div>
-                <div className="text-xs text-gray-600 mb-4">{opt.blurb}</div>
-                <div className="grid grid-cols-3 text-center gap-2">
-                  <div><div className="text-[11px]">Bias</div><div className="text-xl font-extrabold">{opt.align>0?'+':opt.align<0?'-':'·'}</div></div>
-                  <div><div className="text-[11px]">Sensational</div><div className="text-xl font-extrabold">{Math.round(opt.sensational*100)}%</div></div>
-                  <div><div className="text-[11px]">Accuracy</div><div className={`text-xl font-extrabold ${opt.accuracy<0.1?'text-rose-700':''}`}>{Math.round(opt.accuracy*100)}%</div></div>
-                </div>
-                {opt.accuracy<0.1 && <div className="mt-2 text-[11px] text-rose-700 font-semibold">High engagement, low truth</div>}
-              </button>
-            ))}
-          </div>
-
-          {/* Good Program — special ethical lever */}
-          <div className="mt-5 p-4 border rounded-2xl bg-emerald-50/60">
-            <div className="flex items-center justify-between mb-2">
-              <div className="font-semibold">Do the right thing?</div>
-              <div className="text-xs text-gray-600">Costs money, boosts trust, reduces polarization a bit.</div>
+          <GaugeBar value={baseScore} />
+          <div className="text-[11px] text-gray-500 mt-1">Higher is better. Built from Trust, (100−Polarization), License, (100−Pressure), plus Money/Reach bonuses.</div>
+        </GlassCard>
+        <GlassCard className={shake? 'shake' : ''}>
+          <div className="flex items-center justify-between mb-1">
+            <div className="flex items-center gap-2">
+              <DollarSign className="w-5 h-5 text-fuchsia-600"/>
+              <div className="text-sm text-gray-700">Money — segment to <b>Day {segEndDay}</b></div>
             </div>
-            <button
-              onClick={()=> setPreview({ opt: goodProgramOpt, sim: simulate(goodProgramOpt) })}
-              className="border rounded-xl px-4 py-2 bg-emerald-700 text-white hover:bg-emerald-800"
-            >
-              Run Good Program (community outreach)
-            </button>
+            <div className={`text-lg font-bold ${segEarned>=0?'text-emerald-700':'text-rose-700'}`}>{sign(segEarned)}${Math.abs(segEarned)}</div>
+          </div>
+          <GaugeBar value={segPct} label={`${segPct}% to Day ${segEndDay}`} colorByValue />
+          <div className="text-[11px] text-gray-500 mt-1">
+            Segment target: <b>+${segTarget}</b> by Day {segEndDay} • Today’s goal: +${targetIncrement}
+          </div>
+        </GlassCard>
+      </div>
+
+      {/* Power Cards */}
+      {!gameOver && (
+        <div className="mb-5 grid md:grid-cols-2 gap-3">
+          <div className={`p-4 rounded-2xl border bg-white/80 ${cardPolAvail? '':'opacity-60'}`}>
+            <div className="flex items-center justify-between">
+              <div className="font-semibold">🧩 Political Connection</div>
+              <button
+                disabled={!cardPolAvail || (pressure??50) >= 25}
+                onClick={()=>{ usePoliticalCard(); sfx.click(); }}
+                className={`px-3 py-1.5 rounded-xl text-sm ${cardPolAvail && (pressure??50)<25 ? 'bg-emerald-700 text-white':'bg-gray-300 text-gray-600 cursor-not-allowed'}`}
+              >
+                Use
+              </button>
+            </div>
+            <div className="text-xs text-gray-700 mt-1">
+              Use only when <strong>Pressure &lt; 25</strong>. One time. Adds ~<strong>50% of today's goal</strong> in cash and +10 Impact. Doubles Pressure after use.
+            </div>
+          </div>
+          <div className={`p-4 rounded-2xl border bg-white/80 ${cardScoopAvail? '':'opacity-60'}`}>
+            <div className="flex items-center justify-between">
+              <div className="font-semibold">🚨 Inside Scoop (Blast)</div>
+              <button
+                disabled={!cardScoopAvail || !((money < opCost(day, reach)) || (Math.round((money-dayStartMoney)/Math.max(1,targetIncrement)*100) < 50) || (lowReachStreak >= 2))}
+                onClick={()=>{ useScoopCard(); sfx.click(); }}
+                className={`px-3 py-1.5 rounded-xl text-sm ${cardScoopAvail && ((money < opCost(day, reach)) || (Math.round((money-dayStartMoney)/Math.max(1,targetIncrement)*100) < 50) || (lowReachStreak >= 2)) ? 'bg-blue-700 text-white':'bg-gray-300 text-gray-600 cursor-not-allowed'}`}
+              >
+                Use
+              </button>
+            </div>
+            <div className="text-xs text-gray-700 mt-1">
+              Appears in <strong>dire need</strong>. One time. Trust +15, Pol ±3, Money ~<strong>35% of today’s goal</strong>, Pressure +5, Competitor −10. Risk of counter-scoop tomorrow.
+            </div>
           </div>
         </div>
       )}
 
-      {/* Preview */}
+      {/* METRICS (with ℹ︎ tooltips & danger glow) */}
+      <div className="grid lg:grid-cols-3 gap-4 mb-6">
+        <GlassCard className={danger.trust || danger.pol ? 'danger-glow' : ''}>
+          <div className="text-xs text-gray-500 mb-2">Society</div>
+          <div className="grid grid-cols-2 gap-3">
+            <BadgeMetric title="Trust" info="Public confidence in your newsroom. Ideal ≥ 70; game over if below 5." value={trust} delta={deltas.trust} goodUp color="emerald" sub="Ideal ≥ 70 • Game over if < 5" />
+            <BadgeMetric title="Polarization" info="How divided society is. Crisis if 100 for 3 days in a row." value={pol} delta={deltas.pol} goodUp={false} color="rose" sub="Ideal ≤ 55 • Crisis at 100 for 3 days" />
+          </div>
+        </GlassCard>
+        <GlassCard className={danger.money ? 'danger-glow' : ''}>
+          <div className="text-xs text-gray-500 mb-2">Media</div>
+          <div className="grid grid-cols-3 gap-3">
+            <BadgeMetric title="Reach" info="Audience impressions; drives ads." value={reach} delta={deltas.reach} goodUp color="sky" sub="More is better (ads scale with reach)" />
+            <BadgeMetric title="Money" info={`Cash reserves. Must meet or exceed operating cost for 3 consecutive rounds or game over. Today need ≥ $${opCost(day, reach)}.`} value={money} delta={deltas.money} goodUp color="amber" money sub={`Need ≥ $${opCost(day, reach)} • 3 shortfalls = game over`} />
+            <BadgeMetric title="Competitor" info="Rival’s market power. ≥70 reduces ad budgets." value={competitor} delta={0} goodUp={false} color="indigo" sub="≥ 70 reduces ad money" />
+          </div>
+        </GlassCard>
+        <GlassCard className={(danger.license || danger.pressure) ? 'danger-glow' : ''}>
+          <div className="text-xs text-gray-500 mb-2">Operations</div>
+          <div className="grid grid-cols-2 gap-3">
+            <BadgeMetric title="License" info="Regulatory goodwill/permission. 0 = shutdown." value={license??100} delta={deltas.license} goodUp color="violet" sub="Ideal ≥ 60 • Game over at 0" />
+            <BadgeMetric title="Pressure" info="Political pressure on your newsroom; higher means risk of raids/interference." value={pressure??50} delta={deltas.pressure} goodUp={false} color="orange" sub="Ideal 40–60 • Raid risk ≥ 80" />
+          </div>
+        </GlassCard>
+      </div>
+
+      {/* Options */}
+      {!gameOver && (
+        <div className="p-4 rounded-3xl fun-card border mb-5">
+          <p className="text-sm font-semibold mb-3">Choose <span className="underline">one</span> approach for today</p>
+          <div className="grid gap-4 md:grid-cols-3">
+            {options.map((opt, i)=> (
+              <button key={i} onClick={()=> openPreview(opt)} className={`option-card border rounded-3xl p-4 text-left shadow-md hover:shadow-xl bg-gradient-to-br ${opt.color}`}>
+                <div className="flex items-center justify-between">
+                  <div className="text-2xl">{opt.emoji}</div>
+                  <div className="text-xs px-2 py-0.5 rounded-full bg-black text-white">{Math.round(opt.accuracy*100)}% acc</div>
+                </div>
+                <div className="mt-2 text-base font-extrabold">{opt.label}</div>
+                <div className="text-[12px] text-gray-700">{optionStory(opt)}</div>
+                <div className="mt-3 grid grid-cols-3 text-center">
+                  <TinyPill label="Bias" value={opt.align>0?'+':opt.align<0?'-':'·'} />
+                  <TinyPill label="Sens" value={`${Math.round(opt.sensational*100)}%`} />
+                  <TinyPill label="Reach" value={opt.effect.reach>0? `+${opt.effect.reach}`:opt.effect.reach} />
+                </div>
+                {isForced && opt.key!=='proGov' && <div className="mt-3 text-[11px] text-amber-900 bg-amber-100 border border-amber-300 rounded-lg p-2">Forced day: non-pro-gov is punished.</div>}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Preview Modal */}
       <AnimatePresence>
         {preview && (
-          <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} className="fixed inset-0 bg-black/50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl p-6 max-w-2xl w-full">
-              <div className="flex justify-between items-center mb-3"><h3 className="font-semibold">Impact Preview</h3><button onClick={()=>setPreview(null)} title="Close"><X /></button></div>
-              <p className="text-sm text-gray-600 mb-3">Your pick: <span className="font-medium">{preview.opt.label}</span></p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="border rounded-xl p-3">
-                  <div className="text-xs text-gray-500 mb-2">Immediate changes</div>
-                  <ImpactList sim={preview.sim}/>
+          <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-3xl p-6 max-w-3xl w-full">
+              <div className="flex justify-between items-center mb-2">
+                <div className="flex items-center gap-2"><div className="text-2xl">{preview.opt.emoji || '📰'}</div><h3 className="font-bold">{preview.opt.label}</h3></div>
+                <button onClick={()=> setPreview(null)} title="Close"><X /></button>
+              </div>
+              <div className="grid md:grid-cols-2 gap-4">
+                <div className="border rounded-2xl p-3">
+                  <div className="text-xs text-gray-500 mb-2">Immediate</div>
+                  {(() => {
+                    const ff = acceptForeign ? foreignFundingOffer(day, money, pressure??50) : null;
+                    const simNow = simulate(preview.opt, { tempt: acceptTempt, foreign: ff });
+                    return <ImpactList sim={simNow} />;
+                  })()}
                 </div>
-                <div className="border rounded-xl p-3">
-                  <div className="text-xs text-gray-500 mb-2">Notes on Truth vs Power</div>
-                  <p className="text-xs text-gray-700">
-                    Polarization now rises only when coverage is partisan <em>and</em> low-accuracy.
-                    Human stories won’t raise polarization. “Good Program” costs money but rebuilds trust and cools polarization.
-                  </p>
+                <div className="border rounded-2xl p-3">
+                  <div className="text-xs text-gray-500 mb-2">Forecast (end of day)</div>
+                  <p className="text-[11px] text-gray-600">Market speculation might change the final result — analysts may be wrong.</p>
+                  <div className="mt-2 grid md:grid-cols-3 gap-3 text-xs">
+                    <label className="border rounded-xl p-2 flex items-center gap-2">
+                      <input type="checkbox" checked={acceptTempt} onChange={(e)=>setAcceptTempt(e.target.checked)} />
+                      Temptation cash
+                    </label>
+                    {(() => {
+                      const ff = foreignFundingOffer(day, money, pressure??50);
+                      return ff ? (
+                        <label className="border rounded-xl p-2 flex items-center gap-2">
+                          <input type="checkbox" checked={acceptForeign} onChange={(e)=>setAcceptForeign(e.target.checked)} />
+                          Foreign funds (+${ff.cash})
+                        </label>
+                      ) : <div className="border rounded-xl p-2 text-gray-400 text-center">No foreign funds today</div>;
+                    })()}
+                  </div>
                 </div>
               </div>
               <div className="mt-4 flex justify-end gap-2">
-                <button onClick={()=>setPreview(null)} className="border rounded-2xl px-3 py-1.5">Pick another</button>
+                <button onClick={()=> setPreview(null)} className="border rounded-2xl px-3 py-1.5">Back</button>
                 <button onClick={publish} className="bg-black text-white rounded-2xl px-3 py-1.5">Publish</button>
               </div>
             </div>
@@ -655,145 +903,362 @@ export default function MediaNarrativeGame(){
         )}
       </AnimatePresence>
 
-      {/* Day Popup */}
+      {/* Inter-day Loader */}
       <AnimatePresence>
-        {dayPopup && (
-          <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} className="fixed inset-0 bg-black/50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl p-6 max-w-2xl w-full">
-              <div className="flex justify-between items-center mb-3"><h3 className="font-semibold">{dayPopup.gameOver? 'Outcome' : `New Day: ${dayPopup.day}`}</h3><button onClick={()=>setDayPopup(null)} title="Close"><X /></button></div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="border rounded-xl p-3">
-                  <div className="text-xs text-gray-500 mb-2">{dayPopup.gameOver? 'Final impact' : "Yesterday's impact"}</div>
-                  <ul className="text-sm space-y-1">
-                    <li className="flex justify-between"><span>Reach</span><span className={cls(dayPopup.summary.reachDelta)}>{sign(dayPopup.summary.reachDelta)}{dayPopup.summary.reachDelta}</span></li>
-                    <li className="flex justify-between"><span>Money</span><span className={cls(dayPopup.summary.moneyDelta)}>{sign(dayPopup.summary.moneyDelta)}{dayPopup.summary.moneyDelta}</span></li>
-                    <li className="flex justify-between"><span>Trust</span><span className={cls(dayPopup.summary.trustDelta)}>{sign(dayPopup.summary.trustDelta)}{dayPopup.summary.trustDelta}</span></li>
-                    <li className="flex justify-between"><span>Polarization</span><span className={cls(-dayPopup.summary.polDelta)}>{sign(dayPopup.summary.polDelta)}{dayPopup.summary.polDelta}</span></li>
-                    {dayPopup.summary.pressureDelta!=null && <li className="flex justify-between"><span>Political Pressure</span><span className={cls(-dayPopup.summary.pressureDelta)}>{sign(dayPopup.summary.pressureDelta)}{dayPopup.summary.pressureDelta}</span></li>}
-                    {dayPopup.summary.licenseDelta!=null && <li className="flex justify-between"><span>Media License</span><span className={cls(dayPopup.summary.licenseDelta)}>{sign(dayPopup.summary.licenseDelta)}{dayPopup.summary.licenseDelta}</span></li>}
-                  </ul>
-                </div>
-                <div className="border rounded-xl p-3">
-                  <div className="text-xs text-gray-500 mb-2">Updates & Rules</div>
-                  <ul className="text-sm list-disc pl-5 space-y-1">
-                    {dayPopup.events?.map((e,i)=>(<li key={i}>{e.text}</li>))}
-                  </ul>
-                  <div className="mt-3 text-xs text-gray-700">Operating need for Day {dayPopup.day}: <strong>${opCost(dayPopup.day, reach)}</strong> · Shortfall streak: <strong>{needStreak}/3</strong></div>
-                  {dayPopup.gameOver && <p className="mt-3 text-rose-700 font-semibold">Game Over — {dayPopup.gameOver}</p>}
-                </div>
+        {processing && (
+          <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-3xl p-6 max-w-lg w-full">
+              <div className="flex items-center gap-2 mb-3"><div className="text-2xl">{processing.art}</div><div className="font-semibold">Publishing…</div></div>
+              <ul className="text-sm text-gray-700 space-y-2">
+                {processing.lines.map((l, i)=> <li key={i} className="flex items-center gap-2"><span>{l.art}</span><span>{l.text}</span></li>)}
+              </ul>
+              <div className="mt-4 h-2 bg-gray-200 rounded-full overflow-hidden">
+                <motion.div initial={{width: "0%"}} animate={{width: "100%"}} transition={{duration: 2.2, ease: "easeInOut"}} className="h-full bg-gradient-to-r from-indigo-500 to-fuchsia-500"/>
               </div>
-              <div className="mt-4 flex justify-end"><button onClick={()=>setDayPopup(null)} className="bg-black text-white rounded-2xl px-3 py-1.5">Continue</button></div>
             </div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Special Event Overlay */}
+      {/* EOD Summary Modal */}
       <AnimatePresence>
-        {special && (
-          <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} className="fixed inset-0 bg-black/60 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl p-6 max-w-lg w-full text-center">
-              <h3 className="text-xl font-bold mb-2">{special.title}</h3>
-              <p className="text-sm text-gray-700 mb-4">{special.body}</p>
-              <button className="px-4 py-2 rounded-2xl bg-black text-white" onClick={()=> setSpecial(null)}>Got it</button>
+        {eod && (
+          <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-3xl p-6 max-w-2xl w-full">
+              <div className="flex justify-between items-center mb-3">
+                <h3 className="font-bold">Day {day} Results</h3>
+                <button onClick={()=> setEod(null)}><X /></button>
+              </div>
+              <div className="grid sm:grid-cols-3 gap-3 text-sm">
+                <DeltaTile label="Money" value={eod.nextVals.money} delta={eod.deltas.money} money />
+                <DeltaTile label="Reach" value={eod.nextVals.reach} delta={eod.deltas.reach} />
+                <DeltaTile label="Trust" value={eod.nextVals.trust} delta={eod.deltas.trust} />
+                <DeltaTile label="Polarization" value={eod.nextVals.pol} delta={eod.deltas.pol} inverse />
+                <DeltaTile label="Pressure" value={eod.nextVals.pressure??50} delta={eod.deltas.pressure} inverse />
+                <DeltaTile label="License" value={eod.nextVals.license??100} delta={eod.deltas.license} />
+              </div>
+              {eod.notes.length>0 && (
+                <div className="mt-3">
+                  <div className="text-xs text-gray-500 mb-1">Events & Adjustments</div>
+                  <ul className="text-sm space-y-1">
+                    {eod.notes.map((n, i)=> <li key={i} className={`${n.kind==='good'?'text-emerald-700':n.kind==='bad'?'text-rose-700':'text-gray-800'}`}>• {n.text}</li>)}
+                  </ul>
+                </div>
+              )}
+              <div className="mt-4 flex justify-end">
+                <button onClick={confirmEOD} className="bg-black text-white rounded-2xl px-4 py-2">Move to Day {eod.nextDay}</button>
+              </div>
             </div>
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Danger Prompt */}
+      <AnimatePresence>
+        {dangerModal && (
+          <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-3xl p-6 max-w-lg w-full">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="font-bold">⚠️ Critical Zone</h3>
+                <button onClick={()=> setDangerModal(null)}><X/></button>
+              </div>
+              <ul className="text-sm text-gray-800 space-y-1">
+                {dangerModal.map((a,i)=> <li key={i}>• <b>{a.k}</b>: {a.text}</li>)}
+              </ul>
+              <div className="mt-3 flex justify-end">
+                <button onClick={()=> setDangerModal(null)} className="px-3 py-1.5 rounded-2xl bg-black text-white">Got it</button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Confetti */}
+      <div className="pointer-events-none fixed inset-0 z-40">
+        {confetti.map(bit=> (
+          <span key={bit.id}
+            style={{
+              position:'absolute', width:8, height:8, left: bit.left, top: bit.top,
+              background: bit.bg, opacity:.9, transform: `translateY(0) rotate(${bit.rotate}deg)`,
+              transition: `transform ${bit.time}ms ease, opacity ${bit.time}ms ease`
+            }}
+          />
+        ))}
+      </div>
+
+      {/* End Screen */}
+      {gameOver && (
+        <div className="mt-6">
+          <EndCard
+            trust={trust} pol={pol} reach={reach} money={money}
+            pressure={pressure} license={license} competitor={competitor}
+            stats={stats} onRestart={reset}
+          />
+        </div>
+      )}
 
       {/* Intro */}
       <AnimatePresence>
         {intro && (
           <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} className="fixed inset-0 bg-black/50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl p-6 max-w-2xl w-full">
-              <div className="flex items-center gap-2 mb-3"><Megaphone className="w-5 h-5" /><h3 className="font-semibold">Welcome — Fourth Pillar of Democracy</h3></div>
-              <p className="text-sm text-gray-700 mb-2">You run a news agency. Your duty is to tell the truth — but truth alone doesn’t pay the bills. Can you feed your family and staff while upholding democracy?</p>
-              <ul className="text-sm text-gray-700 list-disc pl-5 space-y-1 mb-3">
-                <li><strong>Truth vs Power:</strong> Polarization rises only when coverage is partisan <em>and</em> low-accuracy.</li>
-                <li><strong>Advertisers:</strong> 40% Party A, 35% Party B, 25% agnostic. If reach stagnates, they cut budgets.</li>
-                <li><strong>Operating Cost:</strong> Rises quickly at first; after Day 10, fixed costs are covered — but <em>investors expect returns</em>.</li>
-                <li><strong>Specials:</strong> Recession (5–8), Tech Ban (15 → 16–17 suppressed), Scandal (17), and a Natural Disaster day (9–14).</li>
-                <li><strong>Polarization:</strong> 100 means crisis — society goes crazy.</li>
-                <li><strong>Good Program:</strong> Spend funds to rebuild trust and reduce polarization.</li>
+            <div className="bg-white rounded-3xl p-6 max-w-xl w-full">
+              <div className="flex items-center gap-2 mb-2"><Megaphone className="w-5 h-5"/><h3 className="font-semibold">Welcome to the Color Desk</h3></div>
+              <p className="text-sm text-gray-700">Survive to Day 20 without losing your license or going broke — and don’t keep society at 100 polarization for 3 days straight. Watch the green/red deltas on each metric to learn how your last decision landed.</p>
+              <ul className="text-sm text-gray-700 list-disc pl-5 mt-2">
+                <li>Super Powers: <strong>Political Connection</strong> (Pressure &lt; 25; doubles Pressure after use), <strong>Inside Scoop</strong> (appears in dire need).</li>
+                <li>Limits are shown under each metric (ideal & fail).</li>
+                <li>Click <strong>Newsroom Data</strong> anytime for 5 live bulletin items with mini performance charts.</li>
               </ul>
-              <div className="flex justify-end gap-2"><button onClick={()=>setIntro(false)} className="bg-black text-white rounded-2xl px-3 py-1.5">Start Day 1</button></div>
+              <div className="mt-3 flex justify-end"><button className="px-3 py-1.5 rounded-2xl bg-black text-white" onClick={()=> setIntro(false)}>Start</button></div>
             </div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Endcard */}
-      {ended && (
-        <div className="p-6 border rounded-2xl bg-white">
-          <h2 className="text-xl font-bold mb-2">Media Legacy</h2>
-          <p className="text-sm text-gray-700 mb-1">{legacy().title}</p>
-          <p className="text-sm text-gray-600 mb-4">{legacy().desc}</p>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm mb-4">
-            <div><span className="text-gray-500">Trust:</span> <strong>{trust}</strong></div>
-            <div><span className="text-gray-500">Polarization:</span> <strong>{pol}</strong></div>
-            <div><span className="text-gray-500">Reach:</span> <strong>{reach}</strong></div>
-            <div><span className="text-gray-500">Money:</span> <strong>${money}</strong></div>
-            {pressure!=null && <div><span className="text-gray-500">Pressure:</span> <strong>{pressure}</strong></div>}
-            {license!=null && <div><span className="text-gray-500">License:</span> <strong>{license}</strong></div>}
-          </div>
-          <div className="border rounded-xl p-4 mb-4">
-            <h3 className="font-semibold mb-1">Reflection</h3>
-            <p className="text-sm text-gray-700">During these {Math.min(day-1, MAX_DAY)} days, you chose the <strong>most accurate</strong> option <strong>{truthCount}</strong> time(s). You appeared <strong>influenced by external pressures</strong> (money, political pressure, or license risk) <strong>{influencedCount}</strong> time(s).</p>
-            <p className="text-sm text-gray-700 mt-2">How many times were you able to act purely for truth? How many times did survival steer your hand?</p>
-          </div>
-          <div className="mt-2"><button onClick={reset} className="px-4 py-2 rounded-2xl bg-black text-white">Play again</button></div>
-        </div>
-      )}
+      {/* Info */}
+      <AnimatePresence>
+        {showInfo && !intro && (
+          <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} className="fixed inset-0 bg-black/50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-3xl p-6 max-w-xl w-full">
+              <div className="flex justify-between items-center mb-2"><h3 className="font-semibold">How to Read the Board</h3><button onClick={()=>setShowInfo(false)}><X/></button></div>
+              <ul className="text-sm text-gray-700 list-disc pl-5">
+                <li>Hover the <strong>ℹ︎</strong> next to any metric to see what it means.</li>
+                <li>Green/red numbers next to each metric show today’s change.</li>
+                <li>Society / Media / Operations are separated so you see what’s public, what’s business, and what’s political.</li>
+                <li>Miss the daily money goal and your board will <em>shake</em>. Hit it and you’ll get confetti 🎉 (with a soft chime).</li>
+              </ul>
+              <div className="mt-3 flex justify-end"><button className="border rounded-2xl px-3 py-1.5" onClick={()=>setShowInfo(false)}>Close</button></div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Newsroom Data modal */}
+      <AnimatePresence>
+        {showNewsroom && (
+          <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-3xl p-6 max-w-3xl w-full">
+              <div className="flex justify-between items-center mb-3">
+                <div className="flex items-center gap-2"><Newspaper className="w-5 h-5"/><h3 className="font-semibold">News Bulletin (last day)</h3></div>
+                <div className="flex items-center gap-2">
+                  <button onClick={()=> setBulletin(sampleNews(5))} className="px-2 py-1 border rounded-lg text-xs">Shuffle</button>
+                  <button onClick={()=> setShowNewsroom(false)} className="px-2 py-1 border rounded-lg text-xs">Close</button>
+                </div>
+              </div>
+              <div className="grid md:grid-cols-2 gap-3">
+                {bulletin.map((n)=> (
+                  <div key={n.id} className="p-3 border rounded-2xl">
+                    <div className="text-xs text-gray-500 mb-1 capitalize">{n.cat}</div>
+                    <div className="font-semibold mb-1">{n.title}</div>
+                    <div className="flex items-center gap-2 text-xs mb-2">
+                      <span className={`px-2 py-0.5 rounded-full ${n.tone==='negative'?'bg-rose-100 text-rose-800':n.tone==='neutral'?'bg-gray-100 text-gray-700':'bg-emerald-100 text-emerald-800'}`}>{n.tone}</span>
+                      <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">sens {Math.round(n.sensational*100)}%</span>
+                      <span className={`px-2 py-0.5 rounded-full ${n.perf>=0.55?'bg-emerald-100 text-emerald-800':'bg-gray-100 text-gray-700'}`}>score {Math.round(n.perf*100)}</span>
+                    </div>
+                    <Sparkline points={n.points} good={n.perf>=0.55}/>
+                    <div className="text-[11px] text-gray-500 mt-1">
+                      Negative + sensational tends to perform (ad clicks), even if it hurts trust.
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+
+  /* --------------------------- Inline helpers --------------------------- */
+  function optionStory(opt){
+    switch(opt.key){
+      case 'investigate': return "Slower, higher cost; if decisive & true, long-term trust ↑.";
+      case 'proGov': return `Aligns with ${ruling}; pressure↓ license↑; trust risk if wrong/repeated.`;
+      case 'proOpp': return "Critiques govt; big reach; heavy license/pressure risk if inaccurate.";
+      case 'clickbait': return "Max reach, low accuracy; trust↓; shadowban risk.";
+      case 'human': return "Small reach; modest trust gain; limited revenue.";
+      default: return "";
+    }
+  }
+
+  function usePoliticalCard(){
+    if (!cardPolAvail || (pressure??50) >= 25) return;
+    const add = Math.max(6, Math.round(targetIncrement * (0.45 + Math.random()*0.15)));
+    setMoney(m=> m + add);
+    setPressure(p=> clamp100(((p??50) * 2)));
+    setCardPolAvail(false);
+    setStats(s=> ({...s, polCard: s.polCard + 1}));
+  }
+  function useScoopCard(){
+    if (!cardScoopAvail) return;
+    const targetPctToday = Math.round(((money - dayStartMoney) / Math.max(1,targetIncrement)) * 100);
+    if (!((money < opCost(day, reach)) || (targetPctToday < 50) || (lowReachStreak >= 2))) return;
+    const moneyAdd = Math.max(8, Math.round(targetIncrement * 0.35));
+    const polJitter = rint(-3, 3);
+    setTrust(t=> clamp100(t+15));
+    setPol(p=> clamp100(p + polJitter));
+    setMoney(m=> m + moneyAdd);
+    setPressure(x=> clamp100((x??50) + 5));
+    setCompetitor(c=> clamp100(c - 10));
+    setCardScoopAvail(false);
+    setScoopPenaltyNextDay(true);
+    setStats(s=> ({...s, scoopCard: s.scoopCard + 1}));
+  }
+}
+
+/* --------------------------- UI SUBS --------------------------- */
+function GlassCard({ children, className="" }){
+  return <div className={`p-4 bg-white/80 backdrop-blur border rounded-3xl ${className}`}>{children}</div>;
+}
+function TinyPill({label, value}){
+  return (
+    <div className="flex flex-col items-center">
+      <div className="text-[10px] text-gray-500">{label}</div>
+      <div className="text-sm font-bold">{value}</div>
     </div>
   );
 }
-
-/* ==========================
-   UI Bits
-   ========================== */
-function Stat({ label, value, delta, icon:Icon, money, badWhenUp, sub, subBad, crisisNote, highAlert }){
-  const isUpGood = !badWhenUp;
-  const good = (delta??0) >= 0 ? isUpGood : !isUpGood;
-  const v = useMotionValue(0);
-  const r = useTransform(v, (x)=> Math.round(x));
-  const ref = useRef(null);
-  useEffect(()=>{ const c=animate(v, value, {duration:0.5}); return ()=>c.stop(); }, [value]);
-  useEffect(()=> r.on('change', (n)=> { if(ref.current) ref.current.textContent = money?`$${n}`:`${n}`; }), [money]);
-  const crisisText = crisisNote && value>=100 ? ' (Crisis Level)' : '';
+function BadgeMetric({ title, value, delta=0, goodUp=true, color="emerald", money=false, sub="", info="" }){
+  const palettes = {
+    emerald: "from-emerald-200 to-emerald-100 text-emerald-900 border-emerald-300",
+    rose: "from-rose-200 to-rose-100 text-rose-900 border-rose-300",
+    indigo: "from-indigo-200 to-indigo-100 text-indigo-900 border-indigo-300",
+    orange: "from-amber-200 to-amber-100 text-amber-900 border-amber-300",
+    sky: "from-sky-200 to-sky-100 text-sky-900 border-sky-300",
+    amber: "from-amber-200 to-amber-100 text-amber-900 border-amber-300",
+    violet: "from-violet-200 to-violet-100 text-violet-900 border-violet-300",
+  };
+  const cls = palettes[color] || palettes.emerald;
+  const posGood = goodUp ? delta>=0 : delta<=0;
   return (
-    <div className={`p-4 border rounded-2xl flex items-center justify-between ${highAlert? 'animate-pulse':''}`}>
-      <div className="flex items-center gap-3">
-        <Icon className="w-5 h-5"/>
-        <div>
-          <div className="text-sm text-gray-600">{label}{crisisText}</div>
-          <div ref={ref} className="text-2xl font-extrabold tabular-nums">{money?`$${value}`:value}</div>
-          {sub && <div className={`text-[11px] mt-1 ${subBad? 'text-rose-700':'text-gray-500'}`}>{sub}</div>}
+    <div className={`p-3 rounded-2xl border bg-gradient-to-br ${cls}`}>
+      <div className="flex items-center justify-between">
+        <div className="text-xs flex items-center gap-1">
+          <span>{title}</span>
+          <span title={info} aria-label={`About ${title}`} className="inline-flex items-center justify-center rounded-full w-4 h-4 bg-black/10 text-gray-700">
+            <Info className="w-3 h-3" />
+          </span>
+        </div>
+        <div className={`text-xs font-semibold ${posGood? 'text-emerald-800':'text-rose-800'}`}>
+          {delta===0? '±0' : `${delta>0?'+':''}${money? '$':''}${Math.abs(delta)}`}
         </div>
       </div>
-      {delta!=null && <div className={`text-lg font-bold ${good? 'text-emerald-700':'text-rose-700'}`}>{sign(delta)}{Math.abs(delta)}</div>}
+      <div className="text-lg font-extrabold gaugeText">{money? `$${value}` : value}</div>
+      {sub && <div className="text-[11px] text-gray-700 mt-1">{sub}</div>}
     </div>
   );
 }
-
+function GaugeBar({ value=0, label, colorByValue=false }){
+  const v = clamp100(value);
+  const color = colorByValue ? (v>=75 ? "bg-emerald-500" : v>=50 ? "bg-amber-500" : "bg-rose-500") : "bg-emerald-500";
+  return (
+    <div>
+      <div className="w-full h-4 bg-gray-200 rounded-full overflow-hidden">
+        <motion.div initial={false} animate={{ width: `${v}%` }} transition={{ type: "spring", stiffness: 120, damping: 18 }} className={`h-4 ${color}`} style={{ borderRadius: 9999 }} />
+      </div>
+      <div className="text-xs mt-1 font-semibold">{label ?? `${Math.round(v)}%`}</div>
+    </div>
+  );
+}
 function ImpactList({ sim }){
+  const s = (n)=> n>0?'+':n<0?'-':'';
+  const c = (n)=> n>=0? 'text-emerald-700' : 'text-rose-700';
   const rows = [
-    { k:'Reach Δ', v:`${sign(sim.reachDelta)}${sim.reachDelta}`},
-    { k:'Money Δ', v:`${sign(sim.moneyDelta)}${sim.moneyDelta}`},
-    { k:'Trust', v: sim.nextTrust },
-    { k:'Polarization', v: sim.nextPol },
-    { k:'Narrative Lean', v: sim.nextOpinion },
-    { k:'Pressure (Δ)', v:`${sign(sim.pressureDelta)}${sim.pressureDelta}`},
-    { k:'License (Δ)', v:`${sign(sim.licenseDelta)}${sim.licenseDelta}`},
-    { k:'Truth', v: sim.truth },
+    { k:'Reach Δ', v:sim.reachDelta },
+    { k:'Money Δ', v:sim.moneyDelta },
+    { k:'Trust →', v: sim.nextTrust },
+    { k:'Polarization →', v: sim.nextPol },
+    { k:'Pressure (Δ)', v: sim.pressureDelta },
+    { k:'License (Δ)', v: sim.licenseDelta },
   ];
   return (
     <ul className="text-sm space-y-1">
-      {rows.map(r=> (
-        <li key={r.k} className="flex justify-between">
-          <span>{r.k}</span>
-          <span className={r.k.includes('Δ')? cls(parseInt(r.v)):''}>{r.v}</span>
+      {rows.map((r,i)=> (
+        <li key={i} className="flex justify-between">
+          <span>{r.k}</span><span className={`${typeof r.v==='number' && (r.k.includes('Δ')||r.k.includes('Money'))? c(r.v):''}`}>{(typeof r.v==='number' && (r.k.includes('Δ')||r.k.includes('Money')))? `${s(r.v)}${Math.abs(r.v)}` : r.v}</span>
         </li>
       ))}
     </ul>
   );
+}
+function Sparkline({ points=[], good=false }){
+  const w=160,h=42,pad=6;
+  if (!points.length) points=[0.1,0.2,0.3,0.25,0.4,0.5,0.45];
+  const xs = points.map((_,i)=> pad + (i/(points.length-1))*(w - 2*pad));
+  const ys = points.map(v=> pad + (1 - v)*(h - 2*pad));
+  const path = xs.map((x,i)=> `${i?'L':'M'}${x.toFixed(1)} ${ys[i].toFixed(1)}`).join(' ');
+  const stroke = good? '#059669' : '#6b7280';
+  const fill = good? 'rgba(16,185,129,.12)' : 'rgba(107,114,128,.12)';
+  return (
+    <svg width={w} height={h}>
+      <path d={`${path} L ${w-pad} ${h-pad} L ${pad} ${h-pad} Z`} fill={fill} />
+      <path d={path} fill="none" stroke={stroke} strokeWidth="2" />
+    </svg>
+  );
+}
+function DeltaTile({ label, value, delta, money=false, inverse=false }){
+  const good = inverse ? delta<=0 : delta>=0;
+  return (
+    <div className="p-3 border rounded-2xl">
+      <div className="flex items-center justify-between text-xs">
+        <span>{label}</span>
+        <span className={`${good?'text-emerald-700':'text-rose-700'} font-semibold`}>{delta===0?'±0':`${delta>0?'+':''}${money?'$':''}${Math.abs(delta)}`}</span>
+      </div>
+      <div className="text-lg font-extrabold gaugeText">{money? `$${value}` : value}</div>
+    </div>
+  );
+}
+function EndCard({ trust, pol, reach, money, pressure, license, competitor, stats, onRestart }){
+  const persona = computePersona(stats, { trust, pol, money, license, pressure, reach });
+  return (
+    <div className="p-6 bg-white rounded-3xl border">
+      <h2 className="text-xl font-black mb-2">Your Run</h2>
+      <div className="grid sm:grid-cols-3 gap-3 text-sm">
+        <div className="p-3 rounded-2xl border"><div className="text-gray-500 text-xs">Trust</div><div className="font-bold text-lg">{trust}</div></div>
+        <div className="p-3 rounded-2xl border"><div className="text-gray-500 text-xs">Polarization</div><div className="font-bold text-lg">{pol}</div></div>
+        <div className="p-3 rounded-2xl border"><div className="text-gray-500 text-xs">Money</div><div className="font-bold text-lg">${money}</div></div>
+      </div>
+
+      <div className="mt-4 grid md:grid-cols-2 gap-3">
+        <div className="p-3 rounded-2xl border">
+          <div className="text-xs text-gray-500">Persona</div>
+          <div className="text-lg font-extrabold mt-1">{persona.title}</div>
+          <p className="text-sm text-gray-700 mt-1">{persona.desc}</p>
+          <ul className="text-sm text-gray-700 list-disc pl-5 mt-2">
+            <li>Investigations: <b>{stats.investigate}</b></li>
+            <li>Pro-Gov: <b>{stats.proGov}</b> • Pro-Opp: <b>{stats.proOpp}</b></li>
+            <li>Clickbait: <b>{stats.clickbait}</b> • Human stories: <b>{stats.human}</b></li>
+            <li>Temptation cash: <b>{stats.tempt}</b> • Foreign funds: <b>{stats.foreign}</b></li>
+            <li>Power cards — Political: <b>{stats.polCard}</b>, Scoop: <b>{stats.scoopCard}</b></li>
+          </ul>
+        </div>
+        <div className="p-3 rounded-2xl border">
+          <div className="text-xs text-gray-500">Reflect</div>
+          <p className="text-sm text-gray-700 mt-1">
+            You ran a newsroom under pressure. Were you truly acting as the <b>fourth pillar of democracy</b>,
+            or did business and politics steer your choices? Which 2 decisions would you change if you replayed?
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-4"><button onClick={onRestart} className="px-4 py-2 rounded-2xl bg-black text-white">Play again</button></div>
+    </div>
+  );
+}
+function computePersona(stats, end){
+  const totalChoices = stats.investigate + stats.proGov + stats.proOpp + stats.clickbait + stats.human;
+  const pct = (n)=> totalChoices? (n/totalChoices) : 0;
+
+  const investigative = pct(stats.investigate) >= 0.35 && end.trust >= 70;
+  const partisan = (pct(stats.proGov) >= 0.45 || pct(stats.proOpp) >= 0.45) && end.pol >= 70;
+  const chaos = pct(stats.clickbait) >= 0.30 && end.trust < 50;
+  const community = pct(stats.human) >= 0.35 && end.pol <= 60;
+  const prag = end.money >= 160 && end.license >= 60 && end.trust < 60;
+
+  if (investigative) return { title:"Watchdog Journalist", desc:"You led with fact-checks and earned trust. Money was tight at times, but license health stayed mostly stable." };
+  if (partisan) return { title:"Partisan Crusader", desc:"One side dominated your coverage. Engagement grew, but polarization spiked and the license often felt at risk." };
+  if (chaos) return { title:"Chaos Chaser", desc:"You chased viral spikes even when accuracy suffered. The board lit up, but trust eroded fast." };
+  if (community) return { title:"Community Builder", desc:"Human-first stories kept division in check. Revenue was modest, but the audience felt heard." };
+  if (prag) return { title:"Pragmatist Operator", desc:"You kept the lights on and the license safe, even if public trust took a few hits along the way." };
+  return { title:"Balancing Act", desc:"You mixed strategies to survive. Look at days where money or pressure forced your hand—what values bent first?" };
 }
